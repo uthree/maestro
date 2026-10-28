@@ -1,0 +1,15 @@
+[package]
+name = "maestro-daemon"
+description = "The Maestro daemon: owns every workflow and answers frontends over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+maestro-core.workspace = true
+maestro-protocol.workspace = true
+
+[lints]
+workspace = true
