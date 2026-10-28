@@ -9,7 +9,7 @@ use std::thread;
 
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use maestro_client::{Client, ClientError, Launch, Mirror};
-use maestro_protocol::Event;
+use maestro_protocol::{Event, PROTOCOL_VERSION};
 
 /// A connected daemon, with everything it had when the window connected.
 pub struct Opened {
@@ -48,5 +48,20 @@ pub fn describe(launch: &Launch) -> String {
         Launch::InProcess(_) => "this window".into(),
         Launch::Local { .. } => "this machine".into(),
         Launch::Ssh { destination, .. } => destination.clone(),
+    }
+}
+
+/// Why the connection failed, and what to do about it.
+pub fn explain(error: &ClientError, launch: &Launch) -> String {
+    let place = describe(launch);
+    match error {
+        ClientError::Version { daemon } => format!(
+            "The maestro-daemon on {place} speaks protocol {daemon}, and this app speaks \
+             {PROTOCOL_VERSION}. Install the maestro-daemon built with this app there \
+             (cargo build --workspace), then try again."
+        ),
+        error => {
+            format!("{error}. Check that maestro-daemon is installed on {place} and try again.")
+        }
     }
 }

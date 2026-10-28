@@ -321,20 +321,14 @@ impl Maestro {
     pub(crate) fn lost(&self, reason: String, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         div().flex().flex_1().items_center().justify_center().bg(theme.colors.background).child(
-            EmptyState::new(IconName::Alert, "Can't reach the daemon")
-                .description(format!(
-                    "{reason} Check that maestro-daemon is installed on {} and try again.",
-                    link::describe(&self.launch)
-                ))
-                .action(
-                    Button::new("reconnect", "Try again")
-                        .primary()
-                        .icon(IconName::Refresh)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.connect(cx);
-                            cx.notify();
-                        })),
+            EmptyState::new(IconName::Alert, "Can't reach the daemon").description(reason).action(
+                Button::new("reconnect", "Try again").primary().icon(IconName::Refresh).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.connect(cx);
+                        cx.notify();
+                    }),
                 ),
+            ),
         )
     }
 

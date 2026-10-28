@@ -185,7 +185,7 @@ impl Maestro {
                             Some(opened.events)
                         }
                         Err(error) => {
-                            this.connection = Connection::Lost(error.to_string());
+                            this.connection = Connection::Lost(link::explain(&error, &this.launch));
                             None
                         }
                     }
@@ -199,7 +199,8 @@ impl Maestro {
                 }
             }
             this.update(cx, |this, cx| {
-                this.connection = Connection::Lost("The daemon disconnected.".into());
+                this.connection =
+                    Connection::Lost("The daemon disconnected. Try again to reconnect.".into());
                 cx.notify();
             })
             .ok();

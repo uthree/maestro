@@ -6,7 +6,8 @@
 //!   to edit) and its record of outcomes in `$MAESTRO_HOME`, or `~/.maestro`.
 //! * `maestro-daemon --stdio [--socket PATH]` is what a frontend runs, directly or as
 //!   `ssh host maestro-daemon --stdio`. It relays stdio to the resident daemon, starting one first
-//!   if none answers. SSH does the authentication, so the daemon opens no port of its own.
+//!   if none answers, and replacing one that speaks an older protocol than its own (left running
+//!   from before an upgrade). SSH does the authentication, so the daemon opens no port of its own.
 //!
 //! Diagnostics go to standard error, which `ssh` passes back separately from the protocol.
 
@@ -47,10 +48,12 @@ mod resident {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::os::unix::process::CommandExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    use maestro_protocol::{PROTOCOL_VERSION, ServerMessage};
 
     use super::Hub;
 
@@ -108,10 +111,29 @@ mod resident {
 
     pub(super) fn relay(socket: Option<PathBuf>) -> io::Result<()> {
         let socket = socket.map_or_else(default_socket, Ok)?;
-        let stream = match UnixStream::connect(&socket) {
+        let mut stream = match UnixStream::connect(&socket) {
             Ok(stream) => stream,
             Err(_) => start(&socket)?,
         };
+        let mut hello = greeting(&mut stream)?;
+        if let Ok(ServerMessage::Hello { protocol }) = serde_json::from_slice(&hello)
+            && protocol < PROTOCOL_VERSION
+        {
+            // This build would start a daemon that speaks this frontend's protocol; the old one
+            // can only refuse it. A newer daemon is left alone for its own frontends.
+            eprintln!(
+                "maestro-daemon: replacing the resident daemon, which speaks protocol {protocol}; \
+                 agents it was running are no longer watched"
+            );
+            stop(&socket)?;
+            stream = start(&socket)?;
+            hello = greeting(&mut stream)?;
+        }
+        {
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(&hello)?;
+            stdout.flush()?;
+        }
         let mut upstream = stream.try_clone()?;
         thread::spawn(move || {
             pass(&mut io::stdin().lock(), &mut upstream).ok();
@@ -119,6 +141,37 @@ mod resident {
             upstream.shutdown(std::net::Shutdown::Write).ok();
         });
         pass(&mut &stream, &mut io::stdout().lock())
+    }
+
+    /// The daemon's first line, read a byte at a time so nothing after it is taken from the
+    /// stream.
+    fn greeting(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+        let mut line = Vec::new();
+        let mut byte = [0];
+        while line.last() != Some(&b'\n') {
+            if stream.read(&mut byte)? == 0 {
+                return Err(io::Error::other("the resident daemon closed before greeting"));
+            }
+            line.push(byte[0]);
+        }
+        Ok(line)
+    }
+
+    /// Stops the daemon whose pid file is beside `socket`, and waits until it stops answering.
+    fn stop(socket: &Path) -> io::Result<()> {
+        let pid = std::fs::read_to_string(socket.with_extension("pid"))?;
+        let killed = Command::new("kill").arg(pid.trim()).stderr(Stdio::null()).status()?;
+        if !killed.success() {
+            return Err(io::Error::other(format!("could not stop daemon {}", pid.trim())));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(socket).is_ok() {
+            if Instant::now() > deadline {
+                return Err(io::Error::other("the old daemon is still answering"));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     /// Copies until the end of `from`, flushing after every read so a message is never held back.

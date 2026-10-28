@@ -46,7 +46,8 @@ Install `maestro-daemon` on the server, on its `PATH`, along with the agent CLIs
 `Launch::ssh("user@server")`: it runs `ssh user@server maestro-daemon --stdio`, which starts the
 resident daemon the first time and relays to it after that. The daemon keeps running, and its
 agents keep working, when the frontend disconnects. Its socket and pid file are in
-`$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`).
+`$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`). After an upgrade, the first `--stdio` relay that
+finds the old daemon still running, speaking an older protocol, stops it and starts its own.
 
 The daemon keeps its model catalog and the record of past work in `$MAESTRO_HOME` (default
 `~/.maestro/`). `router.json` lists the models the commander may choose from, with any benchmark
