@@ -66,6 +66,17 @@ impl State {
                 let removed = self.workflow(workflow)?.remove_edge(from, to);
                 (Reply::Done, removed.then_some(workflow))
             }
+            Command::StartAgent { .. }
+            | Command::ListAgents
+            | Command::SendToAgent { .. }
+            | Command::AnswerPermission { .. }
+            | Command::InterruptAgent { .. }
+            | Command::StopAgent { .. }
+            | Command::PublishWorkspace { .. }
+            | Command::MergePullRequest { .. }
+            | Command::RemoveWorktree { .. } => {
+                unreachable!("the hub sends runtime commands to the runtime")
+            }
         })
     }
 

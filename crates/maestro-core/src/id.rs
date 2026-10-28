@@ -32,3 +32,8 @@ id!(
     NodeId,
     "n"
 );
+id!(
+    /// One running agent process, commander or worker.
+    AgentId,
+    "agent"
+);

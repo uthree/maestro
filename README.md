@@ -10,10 +10,28 @@ The plan is in [docs/plan.md](docs/plan.md) (Japanese).
 ## Layout
 
 ```
-crates/maestro-core      domain model: providers, agents, workflow graphs, hosts — no I/O
+crates/maestro-core      domain model: providers, agents, workflow graphs, hosts, agent events — no I/O
 crates/maestro-protocol  commands, replies and events, framed as JSON lines
-crates/maestro-daemon    owns all state; `maestro-daemon --stdio` serves one frontend
+crates/maestro-host      processes on a host (local or over `ssh`), git worktrees, `gh` pull requests
+crates/maestro-agents    adapters for Claude Code, Codex, Antigravity CLI and OpenCode, and the
+                         session that runs one as a worker
+crates/maestro-daemon    owns all state; `serve` is the resident daemon, `--stdio` relays to it
 crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`
+```
+
+## Running the daemon on a server
+
+Install `maestro-daemon` on the server, on its `PATH`, along with the agent CLIs (signed in) and
+`gh` (signed in) if pull requests are wanted. A frontend then connects with
+`Launch::ssh("user@server")`: it runs `ssh user@server maestro-daemon --stdio`, which starts the
+resident daemon the first time and relays to it after that. The daemon keeps running, and its
+agents keep working, when the frontend disconnects. Its socket and pid file are in
+`$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`).
+
+To check an adapter against a CLI installed on a machine:
+
+```sh
+cargo run -p maestro-agents --example try_worker -- claude "Say hello in one word"
 ```
 
 ## Build

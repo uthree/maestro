@@ -11,6 +11,11 @@ The plan, and why the boundaries are where they are, is [docs/plan.md](docs/plan
   views redraw from `Event`s, which every connected frontend receives.
 * **Assume the daemon is on another machine.** Requests are a network round trip; never make one
   on a UI thread. `Host::Local` means the daemon's machine, not the user's.
+* **Provider formats stop at the adapter.** Each CLI's JSON is read only in its module of
+  `maestro-agents`, which turns it into `AgentEvent`s. Adapters do no I/O, so test them by feeding
+  recorded messages; `AgentSession` is the only place that touches a CLI's stdio.
+* **Hosts are explicit.** Run processes through `maestro_host::HostCommand` with the `Host` they
+  belong to; never build an `ssh` command line elsewhere.
 * **Workflows stay acyclic.** Every edit goes through `Workflow` methods, which refuse cycles and
   leave the graph unchanged on failure.
 * Lints: `missing_docs` is on for every crate. Run `cargo fmt --all`, `cargo clippy --workspace
