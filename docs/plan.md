@@ -28,6 +28,11 @@ Maestro は、Claude Code、Codex、Antigravity CLI、OpenCode といったコ�
 
 ### 2. プロバイダ層と実行環境
 
+状況: 実装済み。4つのアダプタすべてで、実機の CLI を使ってテキストのターンを確認しました（Claude Code は
+クラウド環境、Codex / Antigravity CLI / OpenCode は macOS、2026-10-28）。権限要求は Claude Code で、
+拒否までの流れを確認済みです。Codex はワークツリー内の読み取りを承認なしで実行します
+（`workspace-write` サンドボックスの仕様）。Antigravity CLI の権限要求の形式は、まだ確認していません。
+
 - auris-studio のバックエンドを移植し、4つの CLI を共通トレイトで扱います。
 - 実行先（ローカル / SSH 先）とワークスペースを抽象化し、ワーカーごとに git worktree を作ります。
 - git と GitHub の操作（ブランチ、コミット、PR の作成とマージ）を自動化します。

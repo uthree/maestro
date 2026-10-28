@@ -12,14 +12,16 @@
 
 use std::io::{self, BufRead, Write};
 
-use maestro_core::{NodeDraft, NodeId, Workflow, WorkflowId};
+use maestro_core::{
+    AgentEvent, AgentId, AgentSpec, NodeDraft, NodeId, Workflow, WorkflowId, Workspace,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,6 +78,112 @@ pub enum Command {
         /// The dependent.
         to: NodeId,
     },
+    /// Starts an agent process, creating its worktree first when it has one.
+    StartAgent {
+        /// Which CLI, model and workspace.
+        spec: AgentSpec,
+        /// Standing instructions: the agent's role and limits.
+        instructions: String,
+        /// The first message.
+        prompt: String,
+    },
+    /// Lists every agent the daemon has started and not yet forgotten.
+    ListAgents,
+    /// Sends the next message to an agent between turns. This is also how a user writes to a
+    /// workflow node directly.
+    SendToAgent {
+        /// Which agent.
+        agent: AgentId,
+        /// The message.
+        text: String,
+    },
+    /// Answers an agent's [`AgentEvent::PermissionRequested`].
+    AnswerPermission {
+        /// Which agent.
+        agent: AgentId,
+        /// The request's id.
+        request: String,
+        /// Allow, or refuse.
+        allow: bool,
+    },
+    /// Asks an agent to abandon its current turn.
+    InterruptAgent {
+        /// Which agent.
+        agent: AgentId,
+    },
+    /// Kills an agent's process.
+    StopAgent {
+        /// Which agent.
+        agent: AgentId,
+    },
+    /// Commits everything in a workspace, pushes its branch and opens a pull request for it.
+    PublishWorkspace {
+        /// The workspace; it must have a worktree, whose branch is pushed.
+        workspace: Workspace,
+        /// The commit message, used only when there is something to commit.
+        message: String,
+        /// The pull request's title.
+        title: String,
+        /// The pull request's description.
+        body: String,
+        /// The branch to merge into.
+        base: String,
+        /// Open it as a draft.
+        draft: bool,
+    },
+    /// Merges a pull request opened from a workspace.
+    MergePullRequest {
+        /// Any checkout of the repository.
+        workspace: Workspace,
+        /// The pull request's number.
+        number: u64,
+        /// How to merge it.
+        method: MergeMethod,
+    },
+    /// Removes a workspace's worktree, keeping its branch.
+    RemoveWorktree {
+        /// The workspace.
+        workspace: Workspace,
+        /// Discard uncommitted changes rather than refuse.
+        force: bool,
+    },
+}
+
+/// How a pull request is merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    /// One commit on the base branch.
+    Squash,
+    /// A merge commit.
+    Merge,
+    /// Each commit replayed onto the base branch.
+    Rebase,
+}
+
+/// Where an agent is in its life, as far as the daemon can tell from its events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// Working on a turn.
+    Working,
+    /// Blocked on a permission request.
+    AwaitingPermission,
+    /// Between turns, waiting for a message.
+    Idle,
+    /// The process has exited.
+    Exited,
+}
+
+/// One agent, for lists.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSummary {
+    /// Its id.
+    pub id: AgentId,
+    /// How it was started.
+    pub spec: AgentSpec,
+    /// Where it is.
+    pub status: AgentStatus,
 }
 
 /// A one-line summary of a workflow, for lists.
@@ -117,6 +225,25 @@ pub enum Reply {
         /// Its id.
         node: NodeId,
     },
+    /// An agent was started.
+    AgentStarted {
+        /// Its id; its events carry it.
+        agent: AgentId,
+    },
+    /// Every agent.
+    Agents {
+        /// One entry each.
+        agents: Vec<AgentSummary>,
+    },
+    /// A pull request was opened.
+    PullRequestOpened {
+        /// Its number.
+        number: u64,
+        /// Its page.
+        url: String,
+        /// The commit made first, if there was anything to commit.
+        commit: Option<String>,
+    },
 }
 
 /// Why a command failed. The daemon's state is unchanged after any failure.
@@ -135,16 +262,38 @@ pub enum CommandError {
         /// What the workflow said, in words.
         message: String,
     },
+    /// No agent has that id.
+    #[error("agent {agent} does not exist")]
+    UnknownAgent {
+        /// The id asked for.
+        agent: AgentId,
+    },
+    /// The command needs a workspace with a worktree.
+    #[error("the workspace has no worktree")]
+    NoWorktree,
+    /// A process on the host failed: the CLI, `git` or `gh`.
+    #[error("{message}")]
+    Host {
+        /// What failed, with the program's own error text.
+        message: String,
+    },
 }
 
 /// Something that changed in the daemon, sent to every connected frontend.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "event")]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Event {
     /// A workflow was created or edited; the whole graph is sent so a view can redraw from it.
     WorkflowChanged {
         /// The graph as it now is.
         workflow: Workflow,
+    },
+    /// An agent did something.
+    Agent {
+        /// Which agent.
+        agent: AgentId,
+        /// What it did.
+        event: AgentEvent,
     },
 }
 
@@ -193,8 +342,10 @@ pub enum FrameError {
 
 /// Writes one message as a line of JSON and flushes it.
 pub fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> Result<(), FrameError> {
-    serde_json::to_writer(&mut *writer, message)?;
-    writer.write_all(b"\n")?;
+    // One write per message: a socket or pipe then never carries half a line.
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    writer.write_all(&line)?;
     writer.flush()?;
     Ok(())
 }

@@ -37,7 +37,9 @@ fn two_frontends_share_one_daemon() {
     // The TUI sees every edit the GUI made, in order, ending with the full graph.
     let seen: Vec<Event> =
         (0..4).map(|_| tui_events.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
-    let Event::WorkflowChanged { workflow: graph } = seen.last().unwrap();
+    let Some(Event::WorkflowChanged { workflow: graph }) = seen.last() else {
+        panic!("expected the graph last, got {seen:?}");
+    };
     assert_eq!(graph.topological_order(), vec![NodeId(1), NodeId(2)]);
 
     let Reply::Workflows { workflows } = tui.request(Command::ListWorkflows).unwrap() else {

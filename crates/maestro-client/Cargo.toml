@@ -10,8 +10,12 @@ rust-version.workspace = true
 [dependencies]
 maestro-core.workspace = true
 maestro-daemon.workspace = true
+maestro-host.workspace = true
 maestro-protocol.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

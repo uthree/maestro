@@ -18,7 +18,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use maestro_core::Host;
 use maestro_daemon::Hub;
+use maestro_host::HostCommand;
 use maestro_protocol::{
     ClientMessage, Command, CommandError, Event, FrameError, PROTOCOL_VERSION, Reply, RequestId,
     ServerMessage, read_message, write_message,
@@ -55,23 +57,14 @@ impl Launch {
 
     /// The process this launch starts, if it starts one.
     fn process(&self) -> Option<Process> {
-        match self {
-            Self::InProcess(_) => None,
-            Self::Local { program } => {
-                let mut process = Process::new(program);
-                process.arg("--stdio");
-                Some(process)
-            }
+        let (host, program) = match self {
+            Self::InProcess(_) => return None,
+            Self::Local { program } => (Host::Local, program),
             Self::Ssh { destination, program } => {
-                let mut process = Process::new("ssh");
-                // -T: no terminal, so the stream carries only protocol bytes.
-                // BatchMode: fail instead of prompting on a stdin that belongs to the protocol.
-                process.args(["-T", "-o", "BatchMode=yes", destination, "--"]);
-                // ssh hands the remote shell one string, so quote the program for it.
-                process.arg(format!("{} --stdio", shell_quote(program)));
-                Some(process)
+                (Host::Ssh { destination: destination.clone() }, program)
             }
-        }
+        };
+        Some(HostCommand::new(program).arg("--stdio").process(&host))
     }
 }
 
@@ -220,29 +213,9 @@ impl Drop for Client {
     }
 }
 
-/// Quotes a word for a POSIX shell.
-fn shell_quote(word: &str) -> String {
-    if !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)) {
-        return word.into();
-    }
-    format!("'{}'", word.replace('\'', r"'\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quotes_only_what_needs_quoting() {
-        assert_eq!(shell_quote("maestro-daemon"), "maestro-daemon");
-        assert_eq!(
-            shell_quote("/opt/maestro/bin/maestro-daemon"),
-            "/opt/maestro/bin/maestro-daemon"
-        );
-        assert_eq!(shell_quote("my daemon"), "'my daemon'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-        assert_eq!(shell_quote(""), "''");
-    }
 
     #[test]
     fn ssh_launch_runs_the_daemon_without_a_terminal_or_prompts() {
