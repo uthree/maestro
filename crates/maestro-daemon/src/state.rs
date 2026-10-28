@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use maestro_core::{Workflow, WorkflowError, WorkflowId};
+use maestro_core::{NodeOrigin, Workflow, WorkflowError, WorkflowId};
 use maestro_protocol::{Command, CommandError, Event, Reply, WorkflowSummary};
 
 /// Every workflow the daemon knows about.
@@ -66,6 +66,16 @@ impl State {
                 let removed = self.workflow(workflow)?.remove_edge(from, to);
                 (Reply::Done, removed.then_some(workflow))
             }
+            Command::SetWorkflowTarget { workflow, target } => {
+                self.workflow(workflow)?.target = target;
+                (Reply::Done, Some(workflow))
+            }
+            Command::EditNode { workflow, node, edit } => {
+                self.workflow(workflow)?
+                    .edit_node(node, edit, NodeOrigin::User)
+                    .map_err(refused)?;
+                (Reply::Done, Some(workflow))
+            }
             Command::StartAgent { .. }
             | Command::ListAgents
             | Command::SendToAgent { .. }
@@ -74,14 +84,31 @@ impl State {
             | Command::StopAgent { .. }
             | Command::PublishWorkspace { .. }
             | Command::MergePullRequest { .. }
-            | Command::RemoveWorktree { .. } => {
-                unreachable!("the hub sends runtime commands to the runtime")
+            | Command::RemoveWorktree { .. }
+            | Command::RunWorkflow { .. }
+            | Command::SendToNode { .. }
+            | Command::RateNode { .. }
+            | Command::StartCommander { .. }
+            | Command::ChooseModel { .. }
+            | Command::PublishWorkflow { .. } => {
+                unreachable!("the hub sends these to the runtime or the engine")
             }
         })
     }
 
-    fn workflow(&mut self, workflow: WorkflowId) -> Result<&mut Workflow, CommandError> {
+    pub(crate) fn workflow(&mut self, workflow: WorkflowId) -> Result<&mut Workflow, CommandError> {
         self.workflows.get_mut(&workflow).ok_or(CommandError::UnknownWorkflow { workflow })
+    }
+
+    /// Adds a workflow built for a fresh id, such as one from a commander's plan.
+    pub(crate) fn insert<E>(
+        &mut self,
+        build: impl FnOnce(WorkflowId) -> Result<Workflow, E>,
+    ) -> Result<&Workflow, E> {
+        let id = WorkflowId(self.next_workflow + 1);
+        let workflow = build(id)?;
+        self.next_workflow += 1;
+        Ok(self.workflows.entry(id).or_insert(workflow))
     }
 }
 
@@ -100,6 +127,7 @@ mod tests {
             title: title.into(),
             instructions: String::new(),
             model: None,
+            difficulty: None,
             origin: NodeOrigin::User,
         }
     }

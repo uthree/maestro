@@ -28,6 +28,12 @@ resident daemon the first time and relays to it after that. The daemon keeps run
 agents keep working, when the frontend disconnects. Its socket and pid file are in
 `$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`).
 
+The daemon keeps its model catalog and the record of past work in `$MAESTRO_HOME` (default
+`~/.maestro/`). `router.json` lists the models the commander may choose from, with any benchmark
+scores you want it to weigh; it is written as a template the first time and is yours to edit.
+`outcomes.json` records how each node went (success, time, revisions, your rating) and is what
+the router learns from.
+
 To check an adapter against a CLI installed on a machine:
 
 ```sh

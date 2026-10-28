@@ -41,6 +41,9 @@ pub struct WorkerConfig {
     pub instructions: String,
     /// Overrides the executable's name or path.
     pub program: Option<String>,
+    /// Refuse every change to files, where the CLI can be told so up front. The commander runs
+    /// this way; the daemon also refuses any permission it asks for.
+    pub read_only: bool,
 }
 
 /// What an adapter produced from one message.
@@ -129,5 +132,6 @@ fn config(provider: ProviderKind) -> WorkerConfig {
         cwd: "/work/n1".into(),
         instructions: "Only touch src/.".into(),
         program: None,
+        read_only: false,
     }
 }

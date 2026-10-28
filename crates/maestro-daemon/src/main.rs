@@ -2,7 +2,8 @@
 //!
 //! * `maestro-daemon serve [--socket PATH]` runs the resident daemon: one [`Hub`] behind a Unix
 //!   socket, outliving every frontend, so agents keep working while the laptop sleeps and a GUI
-//!   and a TUI can watch the same work.
+//!   and a TUI can watch the same work. It keeps the router's catalog (`router.json`, the user's
+//!   to edit) and its record of outcomes in `$MAESTRO_HOME`, or `~/.maestro`.
 //! * `maestro-daemon --stdio [--socket PATH]` is what a frontend runs, directly or as
 //!   `ssh host maestro-daemon --stdio`. It relays stdio to the resident daemon, starting one first
 //!   if none answers. SSH does the authentication, so the daemon opens no port of its own.
@@ -63,6 +64,15 @@ mod resident {
         Ok(PathBuf::from(home).join(".maestro/daemon.sock"))
     }
 
+    /// Where the daemon keeps what it remembers: `$MAESTRO_HOME`, or `~/.maestro`.
+    fn home() -> io::Result<PathBuf> {
+        if let Some(home) = std::env::var_os("MAESTRO_HOME") {
+            return Ok(home.into());
+        }
+        let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?;
+        Ok(PathBuf::from(home).join(".maestro"))
+    }
+
     pub(super) fn serve(socket: Option<PathBuf>) -> io::Result<()> {
         let socket = socket.map_or_else(default_socket, Ok)?;
         if let Some(directory) = socket.parent() {
@@ -81,7 +91,7 @@ mod resident {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         // Beside the socket, so `kill $(cat daemon.pid)` stops a daemon nothing else can reach.
         std::fs::write(socket.with_extension("pid"), std::process::id().to_string())?;
-        let hub = Hub::new();
+        let hub = Hub::open(&home()?)?;
         for stream in listener.incoming() {
             let stream = stream?;
             let hub = hub.clone();

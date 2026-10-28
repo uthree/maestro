@@ -76,6 +76,9 @@ impl Adapter for Claude {
             // A worker must not inherit the runtime of an agent that started the daemon.
             .env_remove("CLAUDECODE")
             .env_remove("CLAUDE_CODE_ENTRYPOINT");
+        if config.read_only {
+            command = command.args(["--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit"]);
+        }
         if !config.instructions.is_empty() {
             command = command.args(["--append-system-prompt", &config.instructions]);
         }

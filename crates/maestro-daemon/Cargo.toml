@@ -12,6 +12,8 @@ maestro-agents.workspace = true
 maestro-core.workspace = true
 maestro-host.workspace = true
 maestro-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

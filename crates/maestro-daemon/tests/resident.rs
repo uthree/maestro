@@ -15,6 +15,8 @@ fn once(socket: &std::path::Path, command: Command) -> Reply {
         .arg("--stdio")
         .arg("--socket")
         .arg(socket)
+        // The daemon this starts keeps its record beside the socket, not in the real home.
+        .env("MAESTRO_HOME", socket.with_file_name("home"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -207,6 +207,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"hello"}'
             cwd: directory.clone(),
             instructions: String::new(),
             program: Some(fake_claude(&directory)),
+            read_only: false,
         };
         let (events, received) = mpsc::channel();
         let _session = AgentSession::spawn(&Host::Local, adapter(config), "hi", move |event| {

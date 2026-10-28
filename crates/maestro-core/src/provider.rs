@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A coding-agent CLI Maestro drives as a subprocess.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// Anthropic's `claude`.
@@ -35,7 +35,7 @@ impl ProviderKind {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
-            Self::Antigravity => "antigravity",
+            Self::Antigravity => "agy",
             Self::OpenCode => "opencode",
         }
     }
