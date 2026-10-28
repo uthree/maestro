@@ -95,6 +95,9 @@ pub fn adapter(config: WorkerConfig) -> Box<dyn Adapter> {
     }
 }
 
+/// What separates two messages of one turn, in the answer and in the streamed text.
+const PARAGRAPH: &str = "\n\n";
+
 /// Puts the commander's instructions in front of the first prompt, for CLIs that have no
 /// separate channel for them that leaves their own system prompt intact.
 fn with_instructions(instructions: &str, prompt: &str) -> String {

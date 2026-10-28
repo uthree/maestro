@@ -11,7 +11,7 @@ use maestro_host::HostCommand;
 use serde_json::{Value, json};
 
 use crate::rpc::{self, Calls};
-use crate::{Adapter, Output, WorkerConfig, content_text, with_instructions};
+use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text, with_instructions};
 
 enum Purpose {
     Initialize,
@@ -136,6 +136,11 @@ impl Codex {
                 let text = params["delta"].as_str().unwrap_or_default().to_owned();
                 self.answer.push_str(&text);
                 AgentEvent::Text { text }
+            }
+            // Several messages in one turn, around tool calls, read as separate paragraphs.
+            "item/started" if item["type"] == "agentMessage" && !self.answer.is_empty() => {
+                self.answer.push_str(PARAGRAPH);
+                AgentEvent::Text { text: PARAGRAPH.into() }
             }
             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                 AgentEvent::Reasoning { text: params["delta"].as_str().unwrap_or_default().into() }
@@ -285,10 +290,13 @@ mod tests {
 
         codex.receive(json!({"id": turn["id"], "result": {"turn": {"id": "t1"}}}));
         let events: Vec<_> = [
+            json!({"method":"item/started","params":{"turnId":"t1","item":{"id":"m1","type":"agentMessage"}}}),
             json!({"method":"item/agentMessage/delta","params":{"turnId":"t1","delta":"Hi"}}),
             json!({"method":"item/agentMessage/delta","params":{"turnId":"old","delta":"stale"}}),
             json!({"method":"item/started","params":{"turnId":"t1","item":{"id":"c1","type":"commandExecution","command":"ls"}}}),
             json!({"method":"item/completed","params":{"turnId":"t1","item":{"id":"c1","type":"commandExecution","status":"completed","exitCode":1,"aggregatedOutput":"no"}}}),
+            json!({"method":"item/started","params":{"turnId":"t1","item":{"id":"m2","type":"agentMessage"}}}),
+            json!({"method":"item/agentMessage/delta","params":{"turnId":"t1","delta":"Bye"}}),
             json!({"method":"turn/completed","params":{"turn":{"id":"t1","status":"completed"}}}),
         ]
         .into_iter()
@@ -297,7 +305,10 @@ mod tests {
         assert_eq!(events[0], AgentEvent::Text { text: "Hi".into() });
         assert!(matches!(&events[1], AgentEvent::ToolStarted { call } if call.input == r#""ls""#));
         assert!(matches!(&events[2], AgentEvent::ToolFinished { ok: false, .. }));
-        assert_eq!(events[3], AgentEvent::TurnCompleted { answer: "Hi".into() });
+        // The second message is a new paragraph, in the stream and in the answer.
+        assert_eq!(events[3], AgentEvent::Text { text: "\n\n".into() });
+        assert_eq!(events[4], AgentEvent::Text { text: "Bye".into() });
+        assert_eq!(events[5], AgentEvent::TurnCompleted { answer: "Hi\n\nBye".into() });
 
         // The next message goes straight to the existing thread, without instructions again.
         let next = &codex.send("Again")[0];

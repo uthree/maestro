@@ -10,7 +10,7 @@ use maestro_core::{AgentEvent, Effort, PermissionKind, PermissionRequest, ToolCa
 use maestro_host::HostCommand;
 use serde_json::{Value, json};
 
-use crate::{Adapter, Output, WorkerConfig, content_text};
+use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text};
 
 pub(crate) struct Claude {
     config: WorkerConfig,
@@ -119,6 +119,10 @@ impl Adapter for Claude {
                 let delta = &message["event"]["delta"];
                 match delta["type"].as_str().unwrap_or_default() {
                     "text_delta" => {
+                        // A new message after a tool call starts a new paragraph.
+                        if !self.streamed && !self.answer.is_empty() {
+                            output.events.push(AgentEvent::Text { text: PARAGRAPH.into() });
+                        }
                         self.streamed = true;
                         let text = delta["text"].as_str().unwrap_or_default().to_owned();
                         output.events.push(AgentEvent::Text { text });
@@ -134,10 +138,13 @@ impl Adapter for Claude {
                 for part in message["message"]["content"].as_array().into_iter().flatten() {
                     match part["type"].as_str().unwrap_or_default() {
                         "text" => {
-                            let text = part["text"].as_str().unwrap_or_default();
-                            self.answer.push_str(text);
+                            let mut text = part["text"].as_str().unwrap_or_default().to_owned();
+                            if !self.answer.is_empty() {
+                                text.insert_str(0, PARAGRAPH);
+                            }
+                            self.answer.push_str(&text);
                             if !self.streamed {
-                                output.events.push(AgentEvent::Text { text: text.to_owned() });
+                                output.events.push(AgentEvent::Text { text });
                             }
                         }
                         "tool_use" => output.events.push(AgentEvent::ToolStarted {
@@ -232,7 +239,9 @@ mod tests {
                 {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"a.txt"}]}]}}),
             json!({"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"text","text":"sub"}]}}),
-            json!({"type":"result","subtype":"success","is_error":false,"result":"Done."}),
+            json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"All set."}}}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"All set."}]}}),
+            json!({"type":"result","subtype":"success","is_error":false,"result":"All set."}),
         ];
         let events: Vec<_> =
             lines.into_iter().flat_map(|line| claude.receive(line).events).collect();
@@ -250,7 +259,9 @@ mod tests {
                     }
                 },
                 AgentEvent::ToolFinished { id: "t1".into(), ok: true, output: "a.txt".into() },
-                AgentEvent::TurnCompleted { answer: "Done.".into() },
+                AgentEvent::Text { text: "\n\n".into() },
+                AgentEvent::Text { text: "All set.".into() },
+                AgentEvent::TurnCompleted { answer: "Done.\n\nAll set.".into() },
             ]
         );
     }

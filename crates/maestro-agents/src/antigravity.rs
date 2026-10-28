@@ -21,11 +21,14 @@ pub(crate) struct Antigravity {
     /// The tool step still open, finished when the next step or the result arrives.
     open_tool: Option<String>,
     asked: HashMap<String, Value>,
+    /// Whether this turn's reply already arrived as text. `agy` often sends the reply only in
+    /// its result, and a transcript built from events would then show nothing.
+    said: bool,
 }
 
 impl Antigravity {
     pub(crate) fn new(config: WorkerConfig) -> Self {
-        Self { config, first: true, steps: 0, open_tool: None, asked: HashMap::new() }
+        Self { config, first: true, steps: 0, open_tool: None, asked: HashMap::new(), said: false }
     }
 
     fn close_tool(&mut self, output: &mut Output, ok: bool) {
@@ -98,6 +101,7 @@ impl Adapter for Antigravity {
                         },
                     });
                 } else if let Some(text) = step["text"].as_str() {
+                    self.said = true;
                     output.events.push(AgentEvent::Text { text: text.into() });
                 }
             }
@@ -127,10 +131,12 @@ impl Adapter for Antigravity {
                 let ok = result["status"] == "SUCCESS";
                 self.close_tool(&mut output, ok);
                 self.asked.clear();
+                let answer = result["response"].as_str().unwrap_or_default().to_owned();
+                if ok && !std::mem::take(&mut self.said) && !answer.is_empty() {
+                    output.events.push(AgentEvent::Text { text: answer.clone() });
+                }
                 output.events.push(if ok {
-                    AgentEvent::TurnCompleted {
-                        answer: result["response"].as_str().unwrap_or_default().into(),
-                    }
+                    AgentEvent::TurnCompleted { answer }
                 } else {
                     AgentEvent::TurnFailed {
                         message: result["error"]
@@ -186,7 +192,7 @@ mod tests {
         .into_iter()
         .flat_map(|line| agy.receive(line).events)
         .collect();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert!(
             matches!(&events[1], AgentEvent::ToolStarted { call } if call.name == "run_command")
         );
@@ -194,7 +200,9 @@ mod tests {
             events[2],
             AgentEvent::ToolFinished { id: "step-1".into(), ok: true, output: String::new() }
         );
-        assert_eq!(events[3], AgentEvent::TurnCompleted { answer: "Fixed.".into() });
+        // The reply came only in the result, so it is also reported as text.
+        assert_eq!(events[3], AgentEvent::Text { text: "Fixed.".into() });
+        assert_eq!(events[4], AgentEvent::TurnCompleted { answer: "Fixed.".into() });
         assert_eq!(agy.send("More")[0]["message"]["content"], "More");
     }
 }
