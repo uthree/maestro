@@ -65,6 +65,13 @@ Maestro は、Claude Code、Codex、Antigravity CLI、OpenCode といったコ�
 
 ### 4. GUI（gpui + Atelier）
 
-- 指揮官とのチャットパネルと、gpui-flow ベースの DAG エディタを作ります。
-- ノードの状態表示、ノードへの直接メッセージ、ワークフローの編集をつなぎます。
+- `maestro-gui`（実行ファイル名 `maestro`）。指揮官とのチャットパネル、DAG エディタ、ノードのインスペクタ
+  （詳細タブとワーカータブ）からなります。
+- DAG エディタは gpui-flow ではなく、Atelier の node_editor の指針に沿って Atelier の部品から組み立てています。
+  列はノードの依存の深さ（`Workflow::depths`）から決め、位置はフロントエンド側だけで持ちます。
+  ソケットのドラッグで依存を追加し、指揮官が書いた下書きノードはエージェント色の破線と Keep / Remove で示します。
+- フロントエンドの写し（`maestro_client::Mirror`）は GUI と TUI で共有します。後から接続したフロントエンドも
+  会話を再現できるように、デーモンはエージェントごとのトランスクリプトを持ち（`Command::GetTranscript`）、
+  ユーザーが送った文も `AgentEvent::Prompted` として流します。
+- テキスト入力は gpui-component の Input を Atelier の色に合わせて使います（Atelier に入力部品がないため）。
 - TUI（ratatui）は、この後に同じ `maestro-client` の上に作ります。

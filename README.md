@@ -16,8 +16,28 @@ crates/maestro-host      processes on a host (local or over `ssh`), git worktree
 crates/maestro-agents    adapters for Claude Code, Codex, Antigravity CLI and OpenCode, and the
                          session that runs one as a worker
 crates/maestro-daemon    owns all state; `serve` is the resident daemon, `--stdio` relays to it
-crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`
+crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`, and
+                         keeps the frontend's copy of the daemon's state
+crates/maestro-gui       the desktop app (`maestro`), built with gpui and Atelier
 ```
+
+## The desktop app
+
+```sh
+cargo build --workspace
+target/debug/maestro --repo path/to/repository            # daemon on this machine
+target/debug/maestro --ssh user@server --repo /srv/repo   # daemon, repository and agents on a server
+```
+
+Ask the commander what to build in the panel on the right. Its plan appears as a graph of steps;
+edit them (title, instructions, difficulty, provider, dependencies), then press Run. Select a
+step to see its worker, answer its permission requests, or ask it for changes. When every step
+has succeeded, "Open pull request" merges them and opens one pull request.
+
+`--appearance light` and `--direction studio|mono` change the theme. On Linux, building needs
+the X11, Wayland and Vulkan headers (`libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+libxcb1-dev libx11-xcb-dev` on Debian and Ubuntu), and the window needs a window manager or
+compositor to draw.
 
 ## Running the daemon on a server
 

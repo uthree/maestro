@@ -9,15 +9,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use atelier::{
-    ActiveTheme, Badge, Button, ControlSize, IconName, Label, TextColor, TextSize,
-    TitleBar, Tone, WindowFrame,
+    ActiveTheme, Badge, Button, ControlSize, IconName, Label, TextColor, TextSize, TitleBar, Tone,
+    WindowFrame,
 };
 use futures::StreamExt;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, div, prelude::*, px,
+    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::InputState;
 use maestro_client::mirror::Notice;
 use maestro_client::{Client, Launch, Mirror};
 use maestro_core::{
@@ -118,40 +118,30 @@ pub struct Maestro {
     /// How many notices have been seen, so a new one can be announced.
     pub(crate) notices_seen: usize,
     pub(crate) fields: Fields,
-    _subscriptions: Vec<Subscription>,
 }
 
 impl Maestro {
     /// Opens the window's view and starts connecting.
-    pub fn new(launch: Launch, project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        launch: Launch,
+        project: Project,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let repository = project.repository.as_ref().map(|path| path.display().to_string());
         let fields = Fields {
-            composer: input::area(
-                "Describe what you want built, or answer the commander…",
-                "",
-                8,
-                window,
-                cx,
-            ),
+            composer: input::area("Describe what to build…", "", 8, window, cx),
             node_message: input::area("Ask this worker for changes…", "", 6, window, cx),
             title: input::line("Step name", "", window, cx),
             instructions: input::area("What the worker should do", "", 12, window, cx),
-            repository: input::line("/path/to/repository", &repository.unwrap_or_default(), window, cx),
+            repository: input::line(
+                "/path/to/repository",
+                &repository.unwrap_or_default(),
+                window,
+                cx,
+            ),
             base: input::line("main", &project.base, window, cx),
         };
-        // Ctrl+Enter (⌘↩ on a Mac) sends; Enter alone starts a new line.
-        let subscriptions = vec![
-            cx.subscribe_in(&fields.composer, window, |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { secondary: true }) {
-                    this.send_to_commander(window, cx);
-                }
-            }),
-            cx.subscribe_in(&fields.node_message, window, |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { secondary: true }) {
-                    this.send_to_node(window, cx);
-                }
-            }),
-        ];
         let mut view = Self {
             launch,
             connection: Connection::Connecting,
@@ -171,7 +161,6 @@ impl Maestro {
             error: None,
             notices_seen: 0,
             fields,
-            _subscriptions: subscriptions,
         };
         view.connect(cx);
         view
@@ -295,9 +284,12 @@ impl Maestro {
         }
         let Some(found) = self.current().and_then(|flow| flow.node(node)) else { return };
         let (title, instructions) = (found.title.clone(), found.instructions.clone());
-        if found.agent.is_none() {
-            self.node_tab = 0;
-        }
+        // A worker that is busy or waiting is what the user came to see.
+        self.node_tab = match found.status {
+            _ if found.agent.is_none() => 0,
+            NodeStatus::Running | NodeStatus::AwaitingUser => 1,
+            _ => self.node_tab,
+        };
         self.editing = Some((workflow, node));
         self.fields.title.update(cx, |state, cx| state.set_value(title, window, cx));
         self.fields.instructions.update(cx, |state, cx| state.set_value(instructions, window, cx));
@@ -370,7 +362,13 @@ impl Maestro {
         }
     }
 
-    pub(crate) fn answer(&mut self, agent: AgentId, request: String, allow: bool, cx: &mut Context<Self>) {
+    pub(crate) fn answer(
+        &mut self,
+        agent: AgentId,
+        request: String,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(view) = self.mirror.agents.get_mut(&agent) {
             view.transcript.answered(&request, allow);
         }
@@ -378,11 +376,15 @@ impl Maestro {
     }
 
     pub(crate) fn new_workflow(&mut self, cx: &mut Context<Self>) {
-        self.request(Command::CreateWorkflow { title: "Untitled workflow".into() }, cx, |this, reply, _| {
-            if let Reply::WorkflowCreated { workflow } = reply {
-                this.show_workflow(workflow);
-            }
-        });
+        self.request(
+            Command::CreateWorkflow { title: "Untitled workflow".into() },
+            cx,
+            |this, reply, _| {
+                if let Reply::WorkflowCreated { workflow } = reply {
+                    this.show_workflow(workflow);
+                }
+            },
+        );
     }
 
     /// Runs the workflow on screen, first giving it the project as its target if it has none.
@@ -397,9 +399,13 @@ impl Maestro {
             self.error = Some("Choose the repository this workflow should run in.".into());
             return;
         };
-        self.request(Command::SetWorkflowTarget { workflow, target: Some(target) }, cx, move |this, _, cx| {
-            this.command(Command::RunWorkflow { workflow }, cx);
-        });
+        self.request(
+            Command::SetWorkflowTarget { workflow, target: Some(target) },
+            cx,
+            move |this, _, cx| {
+                this.command(Command::RunWorkflow { workflow }, cx);
+            },
+        );
     }
 
     pub(crate) fn publish(&mut self, cx: &mut Context<Self>) {
@@ -523,7 +529,8 @@ impl Maestro {
             None => place,
         };
         let running = flow.is_some_and(|flow| {
-            flow.nodes().any(|node| matches!(node.status, NodeStatus::Running | NodeStatus::AwaitingUser))
+            flow.nodes()
+                .any(|node| matches!(node.status, NodeStatus::Running | NodeStatus::AwaitingUser))
         });
         let finished = flow.is_some_and(|flow| {
             flow.nodes().next().is_some()
@@ -532,8 +539,9 @@ impl Maestro {
         let waiting = flow.map_or(0, |flow| {
             flow.nodes().filter(|node| node.status == NodeStatus::AwaitingUser).count()
         });
-        let failed =
-            flow.map_or(0, |flow| flow.nodes().filter(|node| node.status == NodeStatus::Failed).count());
+        let failed = flow.map_or(0, |flow| {
+            flow.nodes().filter(|node| node.status == NodeStatus::Failed).count()
+        });
         let ready = flow.is_some_and(|flow| flow.nodes().next().is_some()) && !running && !finished;
         let conversation = self.conversation.and_then(|agent| self.mirror.agents.get(&agent));
         let status = conversation.map_or(atelier::agent::AgentStatus::Idle, |view| {
@@ -569,19 +577,22 @@ impl Maestro {
             })
             .when(waiting > 0, |bar| {
                 bar.child(
-                    Badge::new(format!("{waiting} waiting for you")).tone(Tone::Warning).icon(IconName::Alert),
+                    Badge::new(format!("{waiting} waiting for you"))
+                        .tone(Tone::Warning)
+                        .icon(IconName::Alert),
                 )
             })
             .when(failed > 0, |bar| {
-                bar.child(Badge::new(format!("{failed} failed")).tone(Tone::Danger).icon(IconName::Alert))
+                bar.child(
+                    Badge::new(format!("{failed} failed")).tone(Tone::Danger).icon(IconName::Alert),
+                )
             })
             .trailing(
-                atelier::agent::AgentToggle::new("commander-toggle", self.panel_open, status).on_click(
-                    cx.listener(|this, _, _, cx| {
+                atelier::agent::AgentToggle::new("commander-toggle", self.panel_open, status)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.panel_open = !this.panel_open;
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
     }
 
@@ -597,11 +608,17 @@ impl Maestro {
             .mirror
             .agents
             .values()
-            .filter(|view| view.spec.role == AgentRole::Worker && view.status == AgentStatus::Working)
+            .filter(|view| {
+                view.spec.role == AgentRole::Worker && view.status == AgentStatus::Working
+            })
             .count();
         let notice = self.mirror.notices.last().map(|notice| match notice {
-            Notice::PlanRejected { message, .. } => (format!("Plan not used: {message}"), Tone::Warning),
-            Notice::NodeFailed { node, message, .. } => (format!("{node} failed: {message}"), Tone::Danger),
+            Notice::PlanRejected { message, .. } => {
+                (format!("Plan not used: {message}"), Tone::Warning)
+            }
+            Notice::NodeFailed { node, message, .. } => {
+                (format!("{node} failed: {message}"), Tone::Danger)
+            }
             Notice::Published { number, url, .. } => {
                 (format!("Opened pull request #{number}: {url}"), Tone::Success)
             }
@@ -629,9 +646,9 @@ impl Maestro {
             })
             .child(div().flex_1())
             .children(notice.filter(|_| self.error.is_none()).map(|(text, tone)| {
-                div()
-                    .min_w_0()
-                    .child(Label::new(text).size(TextSize::XSmall).color(text_color(tone)).truncate())
+                div().min_w_0().child(
+                    Label::new(text).size(TextSize::XSmall).color(text_color(tone)).truncate(),
+                )
             }))
             .children(self.error.clone().map(|error| {
                 div()
@@ -639,7 +656,12 @@ impl Maestro {
                     .items_center()
                     .gap(theme.spacing.sm)
                     .min_w_0()
-                    .child(Label::new(error).size(TextSize::XSmall).color(TextColor::Danger).truncate())
+                    .child(
+                        Label::new(error)
+                            .size(TextSize::XSmall)
+                            .color(TextColor::Danger)
+                            .truncate(),
+                    )
                     .child(
                         Button::new("dismiss-error", "Dismiss")
                             .ghost()

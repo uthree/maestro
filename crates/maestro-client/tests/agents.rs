@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use maestro_client::{Client, Launch};
+use maestro_client::mirror::Entry;
+use maestro_client::{Client, Launch, Mirror};
 use maestro_core::{
     AgentEvent, AgentId, AgentRole, AgentSpec, Effort, Host, ModelChoice, ModelGrade, ProviderKind,
     Workspace, Worktree,
@@ -134,4 +135,26 @@ fn a_worker_runs_in_its_worktree_and_waits_for_permission() {
     let done = until(&events, agent, |event| matches!(event, AgentEvent::TurnCompleted { .. }));
     assert_eq!(done, AgentEvent::TurnCompleted { answer: "second".into() });
     assert_eq!(next_agent_event(&events, agent), AgentEvent::Exited { reason: None });
+
+    // A frontend that connects now sees both sides of the conversation.
+    let Reply::Transcript { events } = client.request(Command::GetTranscript { agent }).unwrap()
+    else {
+        panic!("expected a transcript");
+    };
+    let prompts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Prompted { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts, ["Make a file", "Again"]);
+    let mirror = Mirror::load(&client).unwrap();
+    let users = mirror.agents[&agent]
+        .transcript
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::User(_)))
+        .count();
+    assert_eq!(users, 2);
 }

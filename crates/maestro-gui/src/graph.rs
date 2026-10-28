@@ -209,7 +209,12 @@ impl Maestro {
 
     // Drawing.
 
-    fn socket(&self, node: &Node, output: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn socket(
+        &self,
+        node: &Node,
+        output: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let id = node.id;
         let color = theme.colors.ports[0];
@@ -281,9 +286,9 @@ impl Maestro {
             Label::new(text).size(TextSize::XSmall).color(color)
         };
         match node.status {
-            NodeStatus::Pending if node.origin == NodeOrigin::Commander => mark.child(
-                Icon::new(IconName::Sparkles).size(px(12.)).color(theme.colors.agent),
-            ),
+            NodeStatus::Pending if node.origin == NodeOrigin::Commander => {
+                mark.child(Icon::new(IconName::Sparkles).size(px(12.)).color(theme.colors.agent))
+            }
             NodeStatus::Pending => mark,
             NodeStatus::Running => mark.child(word("Working", TextColor::Muted)).child(
                 Spinner::new(("node-spinner", node.id.0 as usize))
@@ -396,7 +401,11 @@ impl Maestro {
             .border_1()
             .border_color(border)
             .when(draft, |node| node.border_dashed())
-            .shadow(if dragging { theme.elevation.medium.clone() } else { theme.elevation.low.clone() })
+            .shadow(if dragging {
+                theme.elevation.medium.clone()
+            } else {
+                theme.elevation.low.clone()
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -427,17 +436,20 @@ impl Maestro {
                         .border_color(theme.colors.separator)
                         .bg(theme.colors.agent_wash)
                         .child(
-                            div().flex_1().child(
-                                Label::new("Planned by the commander")
+                            div().flex_1().min_w_0().child(
+                                Label::new("Draft")
                                     .size(TextSize::XSmall)
-                                    .color(TextColor::Agent),
+                                    .color(TextColor::Agent)
+                                    .truncate(),
                             ),
                         )
                         .child(
                             Button::new(("undo-node", id.0 as usize), "Remove")
                                 .ghost()
                                 .size(ControlSize::Small)
-                                .on_click(cx.listener(move |this, _, _, cx| this.remove_node(id, cx))),
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.remove_node(id, cx)),
+                                ),
                         )
                         .child(
                             Button::new(("keep-node", id.0 as usize), "Keep")
@@ -451,7 +463,12 @@ impl Maestro {
     }
 
     /// The dot grid and the wires, painted under the nodes.
-    fn wires(&self, flow: &Workflow, layout: &HashMap<NodeId, Point<Pixels>>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn wires(
+        &self,
+        flow: &Workflow,
+        layout: &HashMap<NodeId, Point<Pixels>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let geometry = Geometry::new(theme);
         let pan = self.canvas.pan;
@@ -531,13 +548,12 @@ impl Maestro {
                     .on_click(cx.listener(|this, _, _, cx| this.add_node(cx))),
             )
             .child(
-                Button::new("reset-view", "Reset view")
-                    .ghost()
-                    .size(ControlSize::Small)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                Button::new("reset-view", "Reset view").ghost().size(ControlSize::Small).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.canvas.reset();
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(Divider::vertical())
             .child(

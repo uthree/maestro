@@ -38,7 +38,8 @@ pub enum Difficulty {
 
 impl Difficulty {
     /// Every difficulty, easiest first.
-    pub const ALL: [Self; 5] = [Self::Trivial, Self::Easy, Self::Moderate, Self::Hard, Self::Expert];
+    pub const ALL: [Self; 5] =
+        [Self::Trivial, Self::Easy, Self::Moderate, Self::Hard, Self::Expert];
 
     /// The name a person reads.
     pub fn label(self) -> &'static str {

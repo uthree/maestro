@@ -81,6 +81,7 @@ fn main() {
         atelier::init(cx, theme);
         gpui_component::init(cx);
         input::follow_theme(cx);
+        input::bind_keys(cx);
 
         let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
         let options = atelier::custom_frame(

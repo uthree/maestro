@@ -6,8 +6,11 @@
 //! needs gpui-component's `Root` as the window's root view, which `main` provides.
 
 use atelier::ActiveTheme;
-use gpui::{App, AppContext, Context, Entity, Window};
-use gpui_component::input::{Input, InputState};
+use gpui::{
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement,
+    Pixels, Styled, Window, div,
+};
+use gpui_component::input::{Enter, Input, InputState};
 
 /// Gives gpui-component the Atelier theme's text, caret and selection colours.
 pub fn follow_theme(cx: &mut App) {
@@ -28,6 +31,35 @@ pub fn follow_theme(cx: &mut App) {
     component.ring = colors.focus_ring;
     component.accent = colors.hover;
     component.muted = colors.sunken;
+}
+
+/// Makes Shift+Enter start a new line in a multi-line field, so plain Enter can send.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("shift-enter", Enter { secondary: true }, Some("Input"))]);
+}
+
+/// A message field: Enter calls `send`, and Shift+Enter (or Ctrl+Enter) starts a new line.
+pub fn message(
+    state: &Entity<InputState>,
+    send: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    // The parent sees the action first, while it is captured, and keeps the field from
+    // turning a plain Enter into a newline.
+    div()
+        .w_full()
+        .capture_action(move |action: &Enter, window, cx| {
+            if !action.secondary {
+                send(window, cx);
+                cx.stop_propagation();
+            }
+        })
+        .child(editor(state))
+}
+
+/// Holds a composer at `width`. Atelier's composer and the slots that hold it size to their
+/// contents, so without this it shrinks to its buttons once a transcript sits above it.
+pub fn stretch(width: Pixels, composer: impl IntoElement) -> impl IntoElement {
+    div().flex().flex_col().w(width).child(composer)
 }
 
 /// A one-line field.

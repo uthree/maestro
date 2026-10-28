@@ -11,11 +11,13 @@ use atelier::{
     TextColor, TextField, TextSize,
 };
 use gpui::{
-    AnyElement, Context, ElementId, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px,
+    AnyElement, Context, ElementId, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::*, px,
 };
 use maestro_client::mirror::{AgentView, Entry, ToolState};
 use maestro_core::{
-    AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeStatus, ProviderKind,
+    AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeStatus, PermissionKind,
+    ProviderKind,
 };
 use maestro_protocol::AgentStatus;
 
@@ -54,13 +56,50 @@ fn element(kind: &str, key: &str) -> ElementId {
     ElementId::Name(format!("{kind}-{key}").into())
 }
 
+/// A reply with its plan blocks folded away: the plan is on the canvas, and the panel offers
+/// to open it.
+fn without_plans(text: &str) -> String {
+    let opening = format!("```{}", maestro_core::plan::PLAN_FENCE);
+    let mut shown = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&opening) {
+        shown.push_str(&rest[..start]);
+        let body = &rest[start + opening.len()..];
+        let Some(end) = body.find("```") else {
+            // Still streaming: hide the half-written plan too.
+            rest = "";
+            break;
+        };
+        shown.push_str("(The plan is in the workflow.)");
+        rest = &body[end + 3..];
+    }
+    shown.push_str(rest);
+    shown
+}
+
+/// What allowing a request of this kind lets the agent do.
+fn approval_body(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Command => "The agent wants to run this command in its worktree.",
+        PermissionKind::FileChange => "The agent wants to change files in its worktree.",
+        PermissionKind::Other => "The agent wants to do something its permissions do not cover.",
+    }
+}
+
+/// The inspector's width; the commander's panel uses its own.
+const INSPECTOR_WIDTH: f32 = 360.;
+
 /// The providers a node can be pinned to, after "let the router choose".
 const RUNS_ON: [&str; 5] = ["Auto", "Claude", "Codex", "Antigravity", "OpenCode"];
 
 impl Maestro {
     fn caption(&self, label: &'static str, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        div().px(theme.spacing.sm).pt(theme.spacing.md).pb(theme.spacing.xs).child(Label::caption(label))
+        div()
+            .px(theme.spacing.sm)
+            .pt(theme.spacing.md)
+            .pb(theme.spacing.xs)
+            .child(Label::caption(label))
     }
 
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -77,15 +116,19 @@ impl Maestro {
                     1 => "1 plan".into(),
                     plans => format!("{plans} plans"),
                 };
-                ConversationRow::new(("conversation", id.0 as usize), conversation_title(view), time)
-                    .status(status)
-                    .selected(self.conversation == Some(id))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.conversation = Some(id);
-                        this.panel_open = true;
-                        cx.notify();
-                    }))
-                    .into_any_element()
+                ConversationRow::new(
+                    ("conversation", id.0 as usize),
+                    conversation_title(view),
+                    time,
+                )
+                .status(status)
+                .selected(self.conversation == Some(id))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.conversation = Some(id);
+                    this.panel_open = true;
+                    cx.notify();
+                }))
+                .into_any_element()
             })
             .collect();
         let workflows: Vec<_> = self
@@ -97,9 +140,9 @@ impl Maestro {
                 let id = flow.id;
                 let total = flow.nodes().count();
                 let done = flow.nodes().filter(|node| node.status == NodeStatus::Succeeded).count();
-                let attention = flow
-                    .nodes()
-                    .any(|node| matches!(node.status, NodeStatus::AwaitingUser | NodeStatus::Failed));
+                let attention = flow.nodes().any(|node| {
+                    matches!(node.status, NodeStatus::AwaitingUser | NodeStatus::Failed)
+                });
                 ListItem::new(("workflow", id.0 as usize), flow.title.clone())
                     .icon(if attention { IconName::Alert } else { IconName::Sliders })
                     .when(attention, |item| item.icon_color(theme.colors.warning))
@@ -178,11 +221,7 @@ impl Maestro {
                     .p(theme.spacing.sm)
                     .border_t_1()
                     .border_color(theme.colors.separator)
-                    .child(
-                        Label::new("Repository")
-                            .size(TextSize::XSmall)
-                            .color(TextColor::Faint),
-                    )
+                    .child(Label::new("Repository").size(TextSize::XSmall).color(TextColor::Faint))
                     .child(
                         Label::new(match &self.project.repository {
                             Some(path) => path.display().to_string(),
@@ -236,13 +275,11 @@ impl Maestro {
                     .p(theme.spacing.xl)
                     .gap(theme.spacing.xl)
                     .bg(theme.colors.surface)
-                    .child(
-                        SectionHeader::new("Plan with the commander").description(
-                            "Tell the commander what you want built. It plans the work as a \
+                    .child(SectionHeader::new("Plan with the commander").description(
+                        "Tell the commander what you want built. It plans the work as a \
                              graph of steps; each step gets its own worker and its own git \
                              worktree, and you can edit the graph before it runs.",
-                        ),
-                    )
+                    ))
                     .child(self.project_fields(cx))
                     .child(
                         div()
@@ -252,7 +289,9 @@ impl Maestro {
                                 Button::new("welcome-ask", "Ask the commander")
                                     .primary()
                                     .icon(IconName::Sparkles)
-                                    .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.new_conversation(cx)),
+                                    ),
                             )
                             .child(
                                 Button::new("welcome-empty", "Start from an empty workflow")
@@ -322,15 +361,17 @@ impl Maestro {
                 Entry::User(text) => {
                     UserMessage::new(text.clone()).id(element("user", &key)).into_any_element()
                 }
-                Entry::Assistant { text, done } => AssistantMessage::new(text.clone())
+                Entry::Assistant { text, done } => AssistantMessage::new(without_plans(text))
                     .id(element("assistant", &key))
                     .meta(meta.clone())
                     .streaming(!done)
                     .into_any_element(),
-                Entry::Reasoning(text) => ReasoningBlock::new(element("reasoning", &key), "Reasoning", text.clone())
-                    .open(open)
-                    .on_toggle(toggle)
-                    .into_any_element(),
+                Entry::Reasoning(text) => {
+                    ReasoningBlock::new(element("reasoning", &key), "Reasoning", text.clone())
+                        .open(open)
+                        .on_toggle(toggle)
+                        .into_any_element()
+                }
                 Entry::Tools(tools) => {
                     let title = match tools.len() {
                         1 => "Used 1 tool".to_string(),
@@ -352,32 +393,42 @@ impl Maestro {
                             format!("{}\n\n{}", tool.call.input, tool.output)
                         };
                         group = group.call(
-                            ToolCall::new(element("tool", &call_key), tool.call.name.clone(), summary, state)
-                                .icon(IconName::Wrench)
-                                .detail(detail)
-                                .open(open)
-                                .on_toggle(cx.listener(move |this, _, _, cx| {
+                            ToolCall::new(
+                                element("tool", &call_key),
+                                tool.call.name.clone(),
+                                summary,
+                                state,
+                            )
+                            .icon(IconName::Wrench)
+                            .detail(detail)
+                            .open(open)
+                            .on_toggle(cx.listener(
+                                move |this, _, _, cx| {
                                     if !this.expanded.remove(&call_key) {
                                         this.expanded.insert(call_key.clone());
                                     }
                                     cx.notify();
-                                })),
+                                },
+                            )),
                         );
                     }
                     group.into_any_element()
                 }
                 Entry::Permission { request, open: true, .. } => {
                     let (allow, deny) = (request.id.clone(), request.id.clone());
-                    ApprovalCard::new(element("approval", &key), format!("Allow: {}?", request.summary))
-                        .body(request.detail.chars().take(400).collect::<String>())
-                        .allow_label("Allow")
-                        .on_allow(cx.listener(move |this, _, _, cx| {
-                            this.answer(agent, allow.clone(), true, cx);
-                        }))
-                        .on_deny(cx.listener(move |this, _, _, cx| {
-                            this.answer(agent, deny.clone(), false, cx);
-                        }))
-                        .into_any_element()
+                    ApprovalCard::new(
+                        element("approval", &key),
+                        format!("Allow: {}?", request.summary),
+                    )
+                    .body(approval_body(request.kind))
+                    .allow_label("Allow")
+                    .on_allow(cx.listener(move |this, _, _, cx| {
+                        this.answer(agent, allow.clone(), true, cx);
+                    }))
+                    .on_deny(cx.listener(move |this, _, _, cx| {
+                        this.answer(agent, deny.clone(), false, cx);
+                    }))
+                    .into_any_element()
                 }
                 Entry::Permission { request, allowed, .. } => ChatNotice::status(match allowed {
                     Some(true) => format!("Allowed: {}", request.summary),
@@ -401,9 +452,14 @@ impl Maestro {
         rows
     }
 
-    pub(crate) fn commander_panel(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn commander_panel(
+        &self,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let view = self.conversation.and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?)));
+        let view =
+            self.conversation.and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?)));
         let (title, status, provider) = match view {
             Some((_, view)) => (
                 conversation_title(view),
@@ -435,14 +491,17 @@ impl Maestro {
                 let Some(flow) = self.mirror.workflows.get(&workflow) else { continue };
                 panel = panel.entry(
                     div().flex().child(
-                        Button::new(("open-plan", workflow.0 as usize), format!("Open \u{201c}{}\u{201d}", flow.title))
-                            .variant(ButtonVariant::Agent)
-                            .icon(IconName::Sparkles)
-                            .size(ControlSize::Small)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.show_workflow(workflow);
-                                cx.notify();
-                            })),
+                        Button::new(
+                            ("open-plan", workflow.0 as usize),
+                            format!("Open \u{201c}{}\u{201d}", flow.title),
+                        )
+                        .variant(ButtonVariant::Agent)
+                        .icon(IconName::Sparkles)
+                        .size(ControlSize::Small)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_workflow(workflow);
+                            cx.notify();
+                        })),
                     ),
                 );
             }
@@ -456,10 +515,17 @@ impl Maestro {
                     "The commander reads the repository, talks the plan through with you, and \
                      writes it as a workflow. It never changes files itself.",
                 ))
-                .when(self.project.repository.is_none(), |empty| empty.child(self.project_fields(cx))),
+                .when(self.project.repository.is_none(), |empty| {
+                    empty.child(self.project_fields(cx))
+                }),
         );
         let composer = Composer::new("commander-composer")
-            .input(input::editor(&self.fields.composer))
+            .input({
+                let this = cx.entity().downgrade();
+                input::message(&self.fields.composer, move |window, cx| {
+                    this.update(cx, |this, cx| this.send_to_commander(window, cx)).ok();
+                })
+            })
             .model(provider.label())
             .busy(busy)
             .on_send(cx.listener(|this, _, window, cx| this.send_to_commander(window, cx)))
@@ -468,7 +534,8 @@ impl Maestro {
                 // The provider is fixed once the conversation starts.
                 composer.on_model(cx.listener(|this, _, _, cx| {
                     let index = ProviderKind::ALL.iter().position(|kind| *kind == this.provider);
-                    this.provider = ProviderKind::ALL[(index.unwrap_or(0) + 1) % ProviderKind::ALL.len()];
+                    this.provider =
+                        ProviderKind::ALL[(index.unwrap_or(0) + 1) % ProviderKind::ALL.len()];
                     cx.notify();
                 }))
             });
@@ -478,7 +545,10 @@ impl Maestro {
             .h_full()
             .border_l_1()
             .border_color(theme.colors.border)
-            .child(panel.composer(composer))
+            .child(
+                panel
+                    .composer(input::stretch(px(width) - theme.spacing.sm * 2. - px(1.), composer)),
+            )
     }
 
     pub(crate) fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -497,7 +567,7 @@ impl Maestro {
             None => self.overview(cx).into_any_element(),
         };
         Sidebar::new(Edge::Right)
-            .w(px(360.))
+            .w(px(INSPECTOR_WIDTH))
             .when(worker.is_some(), |side| {
                 side.child(
                     div()
@@ -508,29 +578,38 @@ impl Maestro {
                         .px(theme.spacing.sm)
                         .border_b_1()
                         .border_color(theme.colors.border)
-                        .child(Tabs::new("node-tabs", ["Details", "Worker"], self.node_tab).on_select(
-                            cx.listener(|this, index: &usize, _, cx| {
-                                this.node_tab = *index;
-                                cx.notify();
-                            }),
-                        )),
+                        .child(
+                            Tabs::new("node-tabs", ["Details", "Worker"], self.node_tab).on_select(
+                                cx.listener(|this, index: &usize, _, cx| {
+                                    this.node_tab = *index;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
                 )
             })
             .child(content)
     }
 
-    fn node_details(&self, node: &maestro_core::Node, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn node_details(
+        &self,
+        node: &maestro_core::Node,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let id = node.id;
         let flow = self.current();
         let dirty = input::text(&self.fields.title, cx) != node.title
             || input::text(&self.fields.instructions, cx) != node.instructions;
-        let label = |text: &'static str| Label::new(text).size(TextSize::Small).color(TextColor::Muted);
+        let label =
+            |text: &'static str| Label::new(text).size(TextSize::Small).color(TextColor::Muted);
         let group = || div().flex().flex_col().gap(theme.spacing.xs);
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
         let runs_on = match &node.model {
             None => 0,
-            Some(choice) => 1 + ProviderKind::ALL.iter().position(|kind| *kind == choice.provider).unwrap_or(0),
+            Some(choice) => {
+                1 + ProviderKind::ALL.iter().position(|kind| *kind == choice.provider).unwrap_or(0)
+            }
         };
         let dependencies: Vec<(NodeId, String)> = flow
             .map(|flow| {
@@ -578,7 +657,18 @@ impl Maestro {
                     .child(
                         group()
                             .child(label("Instructions"))
-                            .child(TextField::new().child(input::editor(&self.fields.instructions))),
+                            .child(
+                                // A capsule suits one line; instructions run to paragraphs.
+                                div()
+                                    .w_full()
+                                    .px(theme.spacing.sm)
+                                    .py(theme.spacing.xs)
+                                    .rounded(theme.shape.radius_md)
+                                    .border_1()
+                                    .border_color(theme.colors.border)
+                                    .bg(theme.colors.sunken)
+                                    .child(input::editor(&self.fields.instructions)),
+                            ),
                     )
                     .child(
                         div().flex().child(
@@ -615,17 +705,23 @@ impl Maestro {
                 group()
                     .child(label("Runs on"))
                     .child(
-                        SegmentedControl::new("runs-on", RUNS_ON.map(Segment::label), runs_on)
-                            .size(ControlSize::Small)
-                            .on_select(cx.listener(move |this, index: &usize, _, cx| {
-                                let model = (*index > 0).then(|| ModelChoice {
-                                    provider: ProviderKind::ALL[*index - 1],
-                                    model: String::new(),
-                                    grade: difficulty.grade(),
-                                    effort: difficulty.effort(),
-                                });
-                                this.edit_node(id, NodeEdit { model: Some(model), ..NodeEdit::default() }, cx);
-                            })),
+                        // Five names do not fit a segmented control at the inspector's width.
+                        div().flex().flex_wrap().gap(theme.spacing.xs).children(RUNS_ON.iter().enumerate().map(
+                            |(index, name)| {
+                                Button::new(("runs-on", index), *name)
+                                    .size(ControlSize::Small)
+                                    .selected(index == runs_on)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let model = (index > 0).then(|| ModelChoice {
+                                            provider: ProviderKind::ALL[index - 1],
+                                            model: String::new(),
+                                            grade: difficulty.grade(),
+                                            effort: difficulty.effort(),
+                                        });
+                                        this.edit_node(id, NodeEdit { model: Some(model), ..NodeEdit::default() }, cx);
+                                    }))
+                            },
+                        )),
                     )
                     .child(Label::new(model_label(node)).size(TextSize::XSmall).color(TextColor::Faint)),
             )
@@ -679,7 +775,13 @@ impl Maestro {
             )
     }
 
-    fn worker(&self, node: NodeId, agent: AgentId, view: &AgentView, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn worker(
+        &self,
+        node: NodeId,
+        agent: AgentId,
+        view: &AgentView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let rows = self.entries(agent, view, cx);
         let busy = view.transcript.busy;
@@ -702,14 +804,20 @@ impl Maestro {
                     .children(rows),
             )
             .child(
-                div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(
+                div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(input::stretch(
+                    px(INSPECTOR_WIDTH) - theme.spacing.sm * 2.,
                     Composer::new("worker-composer")
-                        .input(input::editor(&self.fields.node_message))
+                        .input({
+                            let this = cx.entity().downgrade();
+                            input::message(&self.fields.node_message, move |window, cx| {
+                                this.update(cx, |this, cx| this.send_to_node(window, cx)).ok();
+                            })
+                        })
                         .model(format!("{} · worker", view.spec.model.provider.label()))
                         .busy(busy)
                         .on_send(cx.listener(|this, _, window, cx| this.send_to_node(window, cx)))
                         .on_stop(cx.listener(move |this, _, _, cx| this.interrupt(agent, cx))),
-                ),
+                )),
             )
     }
 
@@ -720,9 +828,10 @@ impl Maestro {
         let total = flow.nodes().count();
         let done = flow.nodes().filter(|node| node.status == NodeStatus::Succeeded).count();
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
-        let target = flow.target.as_ref().map(|target| {
-            format!("{} from {}", target.repository.display(), target.base)
-        });
+        let target = flow
+            .target
+            .as_ref()
+            .map(|target| format!("{} from {}", target.repository.display(), target.base));
         let steps: Vec<_> = flow
             .topological_order()
             .into_iter()
@@ -731,7 +840,9 @@ impl Maestro {
                 let id = node.id;
                 ListItem::new(("step", id.0 as usize), node.title.clone())
                     .description(model_label(node))
-                    .trailing(Badge::new(status_label(node.status)).tone(status_tone(node.status)).dot())
+                    .trailing(
+                        Badge::new(status_label(node.status)).tone(status_tone(node.status)).dot(),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(Some(id));
                         cx.notify();
@@ -748,7 +859,10 @@ impl Maestro {
             .overflow_y_scroll()
             .gap(theme.spacing.xl)
             .p(theme.spacing.lg)
-            .child(SectionHeader::new(flow.title.clone()).description(format!("{done} of {total} steps done")))
+            .child(
+                SectionHeader::new(flow.title.clone())
+                    .description(format!("{done} of {total} steps done")),
+            )
             .child(
                 div()
                     .flex()
@@ -756,22 +870,28 @@ impl Maestro {
                     .gap(theme.spacing.md)
                     .child(Label::caption("Where it runs"))
                     .child(
-                        Label::new(target.unwrap_or_else(|| "Not set; Run uses the project below".into()))
-                            .size(TextSize::Small)
-                            .color(TextColor::Muted),
+                        Label::new(
+                            target.unwrap_or_else(|| "Not set; Run uses the project below".into()),
+                        )
+                        .size(TextSize::Small)
+                        .color(TextColor::Muted),
                     )
                     .child(self.project_fields(cx))
                     .child(
                         div().flex().child(
                             Button::new("use-project", "Use for this workflow")
                                 .size(ControlSize::Small)
-                                .on_click(cx.listener(|this, _, _, cx| this.save_project_target(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.save_project_target(cx)),
+                                ),
                         ),
                     )
                     .child(
                         Switch::new("publish", publish)
                             .label("Open a pull request when every step is done")
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_publish(!publish, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.set_publish(!publish, cx)),
+                            ),
                     ),
             )
             .child(
