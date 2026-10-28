@@ -22,7 +22,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -155,6 +155,11 @@ pub enum Command {
     },
     /// Lists every agent the daemon has started and not yet forgotten.
     ListAgents,
+    /// Fetches everything an agent has done so far, for a frontend that connects while it runs.
+    GetTranscript {
+        /// Which agent.
+        agent: AgentId,
+    },
     /// Sends the next message to an agent between turns. This is also how a user writes to a
     /// workflow node directly.
     SendToAgent {
@@ -301,6 +306,11 @@ pub enum Reply {
         /// One entry each.
         agents: Vec<AgentSummary>,
     },
+    /// An agent's events so far, oldest first. Consecutive pieces of text are joined.
+    Transcript {
+        /// The events.
+        events: Vec<AgentEvent>,
+    },
     /// The router's choice, or `None` when no catalog model is installed on the host.
     ModelChosen {
         /// The choice, with its score and how much record informed it.
@@ -390,6 +400,11 @@ pub enum Event {
         agent: AgentId,
         /// The new workflow.
         workflow: WorkflowId,
+    },
+    /// An agent was started; its events follow.
+    AgentStarted {
+        /// The agent.
+        summary: AgentSummary,
     },
     /// An agent did something.
     Agent {

@@ -1,0 +1,33 @@
+[package]
+name = "maestro-gui"
+description = "The gpui desktop frontend for Maestro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "maestro"
+path = "src/main.rs"
+
+[dependencies]
+maestro-client.workspace = true
+maestro-core.workspace = true
+maestro-protocol.workspace = true
+
+# `runtime_shaders` compiles the Metal shaders at start-up, so the app builds on a Mac with only
+# the Command Line Tools installed.
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+# Atelier, the design language, pinned to a reviewed revision of its main branch.
+atelier = { git = "https://github.com/uthree/design-language", rev = "ae5b23ed61b23e6e0366c9aeaaae134c009da0c3" }
+# Only for its text input (caret, selection, IME); Atelier ships no editor. Later releases need
+# gpui snapshots, and 0.5.1 is the last on gpui 0.2.2.
+gpui-component = "=0.5.1"
+# The daemon's events reach the window as a stream its tasks await.
+futures = "0.3"
+# `RUST_LOG=info maestro` shows what gpui says about the window and the GPU.
+env_logger = "0.11"
+
+[lints]
+workspace = true

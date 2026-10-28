@@ -1,0 +1,110 @@
+//! Maestro's desktop frontend: talk with the commander, watch and edit the workflows it plans,
+//! and steer the workers on each node.
+//!
+//! ```text
+//! maestro [--ssh DESTINATION] [--daemon PROGRAM] [--repo PATH] [--base BRANCH]
+//!         [--appearance dark|light] [--direction glass|studio|mono]
+//! ```
+//!
+//! With `--ssh` the daemon, the repository and every agent are on that machine and only the
+//! window is here. Without it the daemon runs on this machine, started next to this program.
+
+mod app;
+mod graph;
+mod input;
+mod link;
+mod panels;
+
+use std::path::PathBuf;
+
+use atelier::{Appearance, Assets, Direction, Theme};
+use gpui::{
+    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
+use maestro_client::Launch;
+
+use crate::app::{Maestro, Project};
+
+/// The smallest window the layout fits without cutting off controls.
+const MIN_SIZE: (f32, f32) = (900., 600.);
+
+/// The value after `name` on the command line.
+fn argument(name: &str) -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == name {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// Where the daemon is, from the command line.
+fn launch() -> Launch {
+    let program = argument("--daemon");
+    match argument("--ssh") {
+        Some(destination) => Launch::Ssh {
+            destination,
+            program: program.unwrap_or_else(|| maestro_client::DAEMON.into()),
+        },
+        None => Launch::Local { program: program.unwrap_or_else(local_daemon) },
+    }
+}
+
+/// The daemon installed beside this program, or the one on the `PATH`.
+fn local_daemon() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(maestro_client::DAEMON)))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| maestro_client::DAEMON.into())
+}
+
+fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let launch = launch();
+    let project = Project::new(
+        argument("--repo").map(PathBuf::from),
+        argument("--base").unwrap_or_else(|| "main".into()),
+    );
+    let direction =
+        argument("--direction").and_then(|id| Direction::from_id(&id)).unwrap_or_default();
+    let appearance = match argument("--appearance").as_deref() {
+        Some("light") => Appearance::Light,
+        _ => Appearance::Dark,
+    };
+
+    Application::new().with_assets(Assets::default()).run(move |cx: &mut App| {
+        let theme = Theme::new(direction, appearance);
+        let background = theme.window_background();
+        atelier::init(cx, theme);
+        gpui_component::init(cx);
+        input::follow_theme(cx);
+
+        let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
+        let options = atelier::custom_frame(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+                window_background: background,
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Maestro".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &Theme::new(direction, appearance),
+        );
+        cx.open_window(options, |window, cx| {
+            atelier::set_window_background(window, &Theme::new(direction, appearance));
+            let view = cx.new(|cx| Maestro::new(launch, project, window, cx));
+            // gpui-component's text input finds its window through a `Root` at the top. Its
+            // own frame only draws for client-side decorations, which Atelier asks for on
+            // Linux alone; on macOS and Windows it is a plain container.
+            cx.new(|cx| gpui_component::Root::new(view, window, cx))
+        })
+        .expect("failed to open the window");
+        cx.activate(true);
+    });
+}

@@ -37,6 +37,20 @@ pub enum Difficulty {
 }
 
 impl Difficulty {
+    /// Every difficulty, easiest first.
+    pub const ALL: [Self; 5] = [Self::Trivial, Self::Easy, Self::Moderate, Self::Hard, Self::Expert];
+
+    /// The name a person reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Trivial => "Trivial",
+            Self::Easy => "Easy",
+            Self::Moderate => "Moderate",
+            Self::Hard => "Hard",
+            Self::Expert => "Expert",
+        }
+    }
+
     /// The grade of model a node of this difficulty runs on.
     pub fn grade(self) -> ModelGrade {
         match self {
