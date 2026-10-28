@@ -1,0 +1,17 @@
+[package]
+name = "maestro-client"
+description = "Connects a Maestro frontend to a daemon in-process, as a local child, or over SSH"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+maestro-core.workspace = true
+maestro-daemon.workspace = true
+maestro-protocol.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+# A virtual manifest: the root builds nothing itself, so no frontend is privileged over another.
+# Nothing below `maestro-client` knows a UI exists; the gpui and ratatui frontends arrive later.
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/uthree/maestro"
+rust-version = "1.95"
+
+[workspace.dependencies]
+maestro-core = { path = "crates/maestro-core", version = "0.1.0" }
+maestro-protocol = { path = "crates/maestro-protocol", version = "0.1.0" }
+maestro-daemon = { path = "crates/maestro-daemon", version = "0.1.0" }
+maestro-client = { path = "crates/maestro-client", version = "0.1.0" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+missing_docs = "warn"
