@@ -13,7 +13,8 @@
 use std::io::{self, BufRead, Write};
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentSpec, NodeDraft, NodeId, Workflow, WorkflowId, Workspace,
+    AgentEvent, AgentId, AgentSpec, Choice, Difficulty, Host, ModelChoice, NodeDraft, NodeEdit,
+    NodeId, Workflow, WorkflowId, WorkflowTarget, Workspace,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,6 +78,71 @@ pub enum Command {
         from: NodeId,
         /// The dependent.
         to: NodeId,
+    },
+    /// Sets where a workflow's workers run. Needed before [`Command::RunWorkflow`].
+    SetWorkflowTarget {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// The repository and branches, or `None` to make it a sketch again.
+        target: Option<WorkflowTarget>,
+    },
+    /// Edits a node's title, instructions, model or difficulty.
+    EditNode {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// Which node.
+        node: NodeId,
+        /// The changes.
+        edit: NodeEdit,
+    },
+    /// Starts every node whose dependencies have succeeded, and keeps starting nodes as others
+    /// succeed. Running a running workflow again restarts only what is ready and not running.
+    RunWorkflow {
+        /// Which workflow.
+        workflow: WorkflowId,
+    },
+    /// Writes to the worker on a node, asking it for changes. Reopens a node that succeeded,
+    /// and counts as a revision request in the model's record.
+    SendToNode {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// Which node.
+        node: NodeId,
+        /// The message.
+        text: String,
+    },
+    /// Records the user's rating of a finished node, 1 (poor) to 5 (excellent).
+    RateNode {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// Which node.
+        node: NodeId,
+        /// The rating.
+        rating: u8,
+    },
+    /// Starts a commander: an agent that converses with the user and writes plans, which become
+    /// new workflows. The user talks to it with [`Command::SendToAgent`].
+    StartCommander {
+        /// The model it runs on.
+        model: ModelChoice,
+        /// Where it runs and what it may read. It is given no worktree and may not write.
+        workspace: Workspace,
+        /// Where the workflows it plans will run.
+        target: Option<WorkflowTarget>,
+        /// The user's first message.
+        prompt: String,
+    },
+    /// Asks the router which model it would give a node, without starting anything.
+    ChooseModel {
+        /// How hard the node is.
+        difficulty: Difficulty,
+        /// The host the worker would run on; only providers installed there count.
+        host: Host,
+    },
+    /// Merges every node's branch into one branch, pushes it, and opens a pull request.
+    PublishWorkflow {
+        /// Which workflow; every node must have succeeded.
+        workflow: WorkflowId,
     },
     /// Starts an agent process, creating its worktree first when it has one.
     StartAgent {
@@ -235,6 +301,11 @@ pub enum Reply {
         /// One entry each.
         agents: Vec<AgentSummary>,
     },
+    /// The router's choice, or `None` when no catalog model is installed on the host.
+    ModelChosen {
+        /// The choice, with its score and how much record informed it.
+        choice: Option<Choice>,
+    },
     /// A pull request was opened.
     PullRequestOpened {
         /// Its number.
@@ -287,6 +358,38 @@ pub enum Event {
     WorkflowChanged {
         /// The graph as it now is.
         workflow: Workflow,
+    },
+    /// A commander wrote a plan that could not become a workflow.
+    PlanRejected {
+        /// The commander.
+        agent: AgentId,
+        /// Why, in words; the commander is told the same.
+        message: String,
+    },
+    /// A node could not start, or its worker's work could not be kept; the node is now failed.
+    NodeFailed {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// Which node.
+        node: NodeId,
+        /// What went wrong, in words.
+        message: String,
+    },
+    /// A workflow's pull request was opened, by request or because every node succeeded.
+    WorkflowPublished {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// The pull request's number.
+        number: u64,
+        /// Its page.
+        url: String,
+    },
+    /// A commander's plan became a workflow, sent as [`Event::WorkflowChanged`] as well.
+    Planned {
+        /// The commander.
+        agent: AgentId,
+        /// The new workflow.
+        workflow: WorkflowId,
     },
     /// An agent did something.
     Agent {
@@ -395,12 +498,14 @@ mod tests {
             title: "a".into(),
             instructions: String::new(),
             model: None,
+            difficulty: None,
             origin: maestro_core::NodeOrigin::User,
         });
         let b = workflow.add_node(NodeDraft {
             title: "b".into(),
             instructions: String::new(),
             model: None,
+            difficulty: None,
             origin: maestro_core::NodeOrigin::User,
         });
         workflow.add_edge(a, b).unwrap();

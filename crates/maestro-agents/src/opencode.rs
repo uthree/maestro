@@ -178,11 +178,17 @@ impl OpenCode {
 
 impl Adapter for OpenCode {
     fn command(&self) -> HostCommand {
-        HostCommand::new(self.config.program.as_deref().unwrap_or("opencode"))
+        let command = HostCommand::new(self.config.program.as_deref().unwrap_or("opencode"))
             .cwd(&self.config.cwd)
             .arg("acp")
             .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
-            .env("OPENCODE_AUTO_SHARE", "false")
+            .env("OPENCODE_AUTO_SHARE", "false");
+        if self.config.read_only {
+            // Edits are refused outright, and commands must ask so the daemon can refuse them.
+            command.env("OPENCODE_PERMISSION", r#"{"edit":"deny","bash":"ask"}"#)
+        } else {
+            command
+        }
     }
 
     fn start(&mut self, prompt: &str) -> Vec<Value> {

@@ -77,7 +77,8 @@ impl Codex {
                 let thread = self.calls.request(
                     "thread/start",
                     json!({"model": self.config.model, "cwd": self.config.cwd,
-                        "approvalPolicy": "on-request", "sandbox": "workspace-write"}),
+                        "approvalPolicy": "on-request",
+                        "sandbox": if self.config.read_only { "read-only" } else { "workspace-write" }}),
                     Purpose::StartThread,
                 );
                 Output {

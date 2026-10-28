@@ -12,6 +12,7 @@ fn draft(title: &str) -> NodeDraft {
         title: title.into(),
         instructions: String::new(),
         model: None,
+        difficulty: None,
         origin: NodeOrigin::User,
     }
 }

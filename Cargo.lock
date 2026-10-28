@@ -76,6 +76,7 @@ dependencies = [
  "maestro-daemon",
  "maestro-host",
  "maestro-protocol",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
@@ -97,6 +98,8 @@ dependencies = [
  "maestro-core",
  "maestro-host",
  "maestro-protocol",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

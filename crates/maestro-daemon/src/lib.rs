@@ -9,56 +9,74 @@
 //! [`Command`]: maestro_protocol::Command
 //! [`Event`]: maestro_protocol::Event
 
+mod engine;
 mod runtime;
 mod state;
+mod store;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use maestro_protocol::{
-    ClientMessage, Event, FrameError, PROTOCOL_VERSION, ServerMessage, read_message, write_message,
+    ClientMessage, CommandError, Event, FrameError, PROTOCOL_VERSION, ServerMessage, read_message,
+    write_message,
 };
 
+use engine::Job;
 use runtime::Runtime;
 pub use state::State;
+use store::Store;
 
-/// Shared state, the runtime, and the outgoing queue of every connection.
+/// Shared state, the runtime, the engine, and the outgoing queue of every connection.
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<Mutex<Inner>>,
     runtime: Arc<Runtime>,
+    engine: Sender<Job>,
 }
 
 impl Default for Hub {
+    /// A hub that remembers nothing once it is dropped.
     fn default() -> Self {
-        let inner = Arc::new(Mutex::new(Inner::default()));
-        let shared = Arc::clone(&inner);
-        let runtime = Runtime::new(Arc::new(move |event| {
-            broadcast(&mut shared.lock().expect("hub lock"), &event);
-        }));
-        Self { inner, runtime }
+        Self::with_store(Store::memory())
     }
 }
 
-fn broadcast(inner: &mut Inner, event: &Event) {
+pub(crate) fn broadcast(inner: &mut Inner, event: &Event) {
     inner.connections.retain(|(_, connection)| {
         connection.send(ServerMessage::Event { event: event.clone() }).is_ok()
     });
 }
 
 #[derive(Default)]
-struct Inner {
-    state: State,
+pub(crate) struct Inner {
+    pub(crate) state: State,
     connections: Vec<(u64, Sender<ServerMessage>)>,
     next_connection: u64,
 }
 
 impl Hub {
-    /// A hub with empty state.
+    /// A hub with empty state, remembering nothing once it is dropped.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A hub that keeps the router's catalog and its record of outcomes in `home`.
+    pub fn open(home: &Path) -> io::Result<Self> {
+        Ok(Self::with_store(Store::open(home)?))
+    }
+
+    fn with_store(store: Store) -> Self {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        let shared = Arc::clone(&inner);
+        let runtime = Runtime::new(Arc::new(move |event| {
+            broadcast(&mut shared.lock().expect("hub lock"), &event);
+        }));
+        let engine = engine::spawn(Arc::clone(&inner), Arc::clone(&runtime), store);
+        Self { inner, runtime, engine }
     }
 
     /// Serves one connection until its reader ends, then returns.
@@ -105,6 +123,18 @@ impl Hub {
         outgoing: &Sender<ServerMessage>,
     ) -> Result<(), FrameError> {
         while let Some(ClientMessage { id, command }) = read_message(&mut reader)? {
+            if engine::handles(&command) {
+                let (answer, answered) = mpsc::channel();
+                self.engine.send(Job::Command(Box::new(command), answer)).ok();
+                let outgoing = outgoing.clone();
+                thread::spawn(move || {
+                    let result = answered.recv().unwrap_or_else(|_| {
+                        Err(CommandError::Host { message: "the workflow engine stopped".into() })
+                    });
+                    outgoing.send(ServerMessage::Response { id, result }).ok();
+                });
+                continue;
+            }
             if Runtime::handles(&command) {
                 let runtime = Arc::clone(&self.runtime);
                 let outgoing = outgoing.clone();

@@ -10,8 +10,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::id::{NodeId, WorkflowId};
+use std::path::PathBuf;
+
+use crate::id::{AgentId, NodeId, WorkflowId};
 use crate::provider::ModelChoice;
+use crate::routing::Difficulty;
+use crate::target::Host;
 
 /// Who put a node into the graph, shown so the user can tell their own edits from the plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,10 +50,27 @@ pub struct NodeDraft {
     pub title: String,
     /// What the worker is asked to do.
     pub instructions: String,
-    /// The model chosen for it, or `None` to let the commander choose when it runs.
+    /// The model chosen for it, or `None` to let the router choose when it runs.
     pub model: Option<ModelChoice>,
+    /// How hard it is; decides the model's grade and effort when the router chooses.
+    #[serde(default)]
+    pub difficulty: Option<Difficulty>,
     /// Who wrote it.
     pub origin: NodeOrigin,
+}
+
+/// Changes to a node the user or the commander makes after it was added. `None` leaves a field
+/// as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEdit {
+    /// A new title.
+    pub title: Option<String>,
+    /// New instructions.
+    pub instructions: Option<String>,
+    /// A new model; `Some(None)` hands the choice back to the router.
+    pub model: Option<Option<ModelChoice>>,
+    /// A new difficulty.
+    pub difficulty: Option<Difficulty>,
 }
 
 /// One piece of work for one worker.
@@ -63,10 +84,34 @@ pub struct Node {
     pub instructions: String,
     /// The model chosen for it, if one has been.
     pub model: Option<ModelChoice>,
+    /// How hard it is.
+    #[serde(default)]
+    pub difficulty: Option<Difficulty>,
     /// Who wrote it.
     pub origin: NodeOrigin,
     /// Where it is in its life.
     pub status: NodeStatus,
+    /// The worker on it, once one has started. A user's message to the node goes to this agent.
+    #[serde(default)]
+    pub agent: Option<AgentId>,
+    /// The branch its work is committed on, once it has a worktree.
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// The repository a workflow's workers check out, and what happens to their work.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkflowTarget {
+    /// The machine the repository is on.
+    pub host: Host,
+    /// The repository's main checkout.
+    pub repository: PathBuf,
+    /// The branch every node's branch starts from, and the pull request merges into.
+    pub base: String,
+    /// Where the nodes' worktrees go; each gets a directory named after its branch.
+    pub worktrees: PathBuf,
+    /// Open a pull request for the whole workflow once every node has succeeded.
+    pub publish: bool,
 }
 
 /// `to` depends on `from`.
@@ -105,6 +150,8 @@ pub struct Workflow {
     pub id: WorkflowId,
     /// A short name for lists.
     pub title: String,
+    /// Where its workers run; a workflow without one can be drawn and edited, not run.
+    pub target: Option<WorkflowTarget>,
     nodes: BTreeMap<NodeId, Node>,
     edges: BTreeSet<Edge>,
     next_node: u64,
@@ -117,6 +164,8 @@ pub struct Workflow {
 struct WorkflowRepr {
     id: WorkflowId,
     title: String,
+    #[serde(default)]
+    target: Option<WorkflowTarget>,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     next_node: u64,
@@ -127,6 +176,7 @@ impl From<WorkflowRepr> for Workflow {
         Self {
             id: repr.id,
             title: repr.title,
+            target: repr.target,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
             next_node: repr.next_node,
@@ -139,6 +189,7 @@ impl From<Workflow> for WorkflowRepr {
         Self {
             id: flow.id,
             title: flow.title,
+            target: flow.target,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
             next_node: flow.next_node,
@@ -152,6 +203,7 @@ impl Workflow {
         Self {
             id,
             title: title.into(),
+            target: None,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),
             next_node: 1,
@@ -177,11 +229,20 @@ impl Workflow {
     pub fn add_node(&mut self, draft: NodeDraft) -> NodeId {
         let id = NodeId(self.next_node);
         self.next_node += 1;
-        let NodeDraft { title, instructions, model, origin } = draft;
-        self.nodes.insert(
+        let NodeDraft { title, instructions, model, difficulty, origin } = draft;
+        let status = NodeStatus::Pending;
+        let node = Node {
             id,
-            Node { id, title, instructions, model, origin, status: NodeStatus::Pending },
-        );
+            title,
+            instructions,
+            model,
+            difficulty,
+            origin,
+            status,
+            agent: None,
+            branch: None,
+        };
+        self.nodes.insert(id, node);
         id
     }
 
@@ -214,8 +275,60 @@ impl Workflow {
 
     /// Sets a node's status.
     pub fn set_status(&mut self, id: NodeId, status: NodeStatus) -> Result<(), WorkflowError> {
-        self.nodes.get_mut(&id).ok_or(WorkflowError::UnknownNode(id))?.status = status;
+        self.node_mut(id)?.status = status;
         Ok(())
+    }
+
+    /// Changes a node's content. The user's edit of a commander's node makes it the user's.
+    pub fn edit_node(
+        &mut self,
+        id: NodeId,
+        edit: NodeEdit,
+        by: NodeOrigin,
+    ) -> Result<(), WorkflowError> {
+        let node = self.node_mut(id)?;
+        let NodeEdit { title, instructions, model, difficulty } = edit;
+        if let Some(title) = title {
+            node.title = title;
+        }
+        if let Some(instructions) = instructions {
+            node.instructions = instructions;
+        }
+        if let Some(model) = model {
+            node.model = model;
+        }
+        if let Some(difficulty) = difficulty {
+            node.difficulty = Some(difficulty);
+        }
+        if by == NodeOrigin::User {
+            node.origin = NodeOrigin::User;
+        }
+        Ok(())
+    }
+
+    /// Records the worker, model and branch a node runs with.
+    pub fn assign(
+        &mut self,
+        id: NodeId,
+        agent: AgentId,
+        model: ModelChoice,
+        branch: String,
+    ) -> Result<(), WorkflowError> {
+        let node = self.node_mut(id)?;
+        node.agent = Some(agent);
+        node.model = Some(model);
+        node.branch = Some(branch);
+        node.status = NodeStatus::Running;
+        Ok(())
+    }
+
+    /// The node a worker is on.
+    pub fn node_of(&self, agent: AgentId) -> Option<NodeId> {
+        self.nodes.values().find(|node| node.agent == Some(agent)).map(|node| node.id)
+    }
+
+    fn node_mut(&mut self, id: NodeId) -> Result<&mut Node, WorkflowError> {
+        self.nodes.get_mut(&id).ok_or(WorkflowError::UnknownNode(id))
     }
 
     /// The nodes `id` waits for.
@@ -286,6 +399,7 @@ mod tests {
             title: title.into(),
             instructions: String::new(),
             model: None,
+            difficulty: None,
             origin: NodeOrigin::Commander,
         }
     }

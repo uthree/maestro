@@ -6,10 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use maestro_agents::{AgentSession, WorkerConfig};
-use maestro_core::{AgentEvent, AgentId, AgentSpec, Workspace};
+use maestro_core::{AgentEvent, AgentId, AgentRole, AgentSpec, Workspace};
 use maestro_host::github::{self, PullRequestDraft};
 use maestro_host::{HostError, git};
 use maestro_protocol::{
@@ -17,6 +17,7 @@ use maestro_protocol::{
 };
 
 pub(crate) type Broadcast = Arc<dyn Fn(Event) + Send + Sync>;
+pub(crate) type Listener = Box<dyn Fn(AgentId, AgentEvent) + Send + Sync>;
 
 struct Agent {
     spec: AgentSpec,
@@ -28,6 +29,8 @@ pub(crate) struct Runtime {
     agents: Mutex<BTreeMap<AgentId, Agent>>,
     next_agent: AtomicU64,
     broadcast: Broadcast,
+    /// Also told every event: the workflow engine, which moves nodes along as workers finish.
+    listener: OnceLock<Listener>,
     this: Weak<Runtime>,
 }
 
@@ -37,8 +40,14 @@ impl Runtime {
             agents: Mutex::default(),
             next_agent: AtomicU64::new(1),
             broadcast,
+            listener: OnceLock::new(),
             this: this.clone(),
         })
+    }
+
+    /// Sends every later agent event to `listener` too.
+    pub(crate) fn listen(&self, listener: Listener) {
+        self.listener.set(listener).ok();
     }
 
     /// Whether `command` belongs here rather than to the workflow state.
@@ -60,7 +69,7 @@ impl Runtime {
     pub(crate) fn execute(&self, command: Command) -> Result<Reply, CommandError> {
         match command {
             Command::StartAgent { spec, instructions, prompt } => {
-                self.start(spec, instructions, &prompt)
+                self.start(spec, instructions, &prompt).map(|agent| Reply::AgentStarted { agent })
             }
             Command::ListAgents => {
                 let agents = self.agents.lock().expect("agents lock");
@@ -116,12 +125,14 @@ impl Runtime {
         }
     }
 
-    fn start(
+    /// Starts an agent, creating its worktree first. A commander is started read-only, and any
+    /// permission it asks for is refused.
+    pub(crate) fn start(
         &self,
         spec: AgentSpec,
         instructions: String,
         prompt: &str,
-    ) -> Result<Reply, CommandError> {
+    ) -> Result<AgentId, CommandError> {
         prepare_worktree(&spec.workspace).map_err(failed)?;
         let agent = AgentId(self.next_agent.fetch_add(1, Ordering::Relaxed));
         self.agents.lock().expect("agents lock").insert(
@@ -135,6 +146,7 @@ impl Runtime {
             cwd: spec.workspace.working_directory().clone(),
             instructions,
             program: None,
+            read_only: spec.role == AgentRole::Commander,
         };
         let this = self.this.clone();
         let spawned = AgentSession::spawn(
@@ -153,7 +165,7 @@ impl Runtime {
                 if let Some(entry) = agents.get_mut(&agent) {
                     entry.session = Some(session);
                 }
-                Ok(Reply::AgentStarted { agent })
+                Ok(agent)
             }
             Err(error) => {
                 agents.remove(&agent);
@@ -171,10 +183,21 @@ impl Runtime {
             AgentEvent::Exited { .. } => Some(AgentStatus::Exited),
             _ => None,
         };
-        if let Some(status) = status
-            && let Some(entry) = self.agents.lock().expect("agents lock").get_mut(&agent)
-        {
-            entry.status = status;
+        if let Some(entry) = self.agents.lock().expect("agents lock").get_mut(&agent) {
+            if let Some(status) = status {
+                entry.status = status;
+            }
+            // The commander plans; it never changes anything, whatever it asks.
+            if let AgentEvent::PermissionRequested { request } = &event
+                && entry.spec.role == AgentRole::Commander
+                && let Some(session) = &entry.session
+            {
+                session.answer(request.id.clone(), false);
+                entry.status = AgentStatus::Working;
+            }
+        }
+        if let Some(listener) = self.listener.get() {
+            listener(agent, event.clone());
         }
         (self.broadcast)(Event::Agent { agent, event });
     }
@@ -199,7 +222,7 @@ impl Runtime {
 }
 
 /// Creates the workspace's worktree unless it is already registered.
-fn prepare_worktree(workspace: &Workspace) -> Result<(), HostError> {
+pub(crate) fn prepare_worktree(workspace: &Workspace) -> Result<(), HostError> {
     let Some(worktree) = &workspace.worktree else { return Ok(()) };
     let existing = git::list_worktrees(&workspace.host, &workspace.repository)?;
     if existing.iter().any(|entry| entry.path == worktree.path) {
@@ -208,6 +231,6 @@ fn prepare_worktree(workspace: &Workspace) -> Result<(), HostError> {
     git::add_worktree(&workspace.host, &workspace.repository, worktree)
 }
 
-fn failed(error: HostError) -> CommandError {
+pub(crate) fn failed(error: HostError) -> CommandError {
     CommandError::Host { message: error.to_string() }
 }

@@ -34,6 +34,7 @@ fn main() {
         cwd: std::env::current_dir().unwrap(),
         instructions: "Answer briefly.".into(),
         program: None,
+        read_only: true,
     };
     let (events, received) = mpsc::channel();
     let session = AgentSession::spawn(&Host::Local, adapter(config), prompt, move |event| {

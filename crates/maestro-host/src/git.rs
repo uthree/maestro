@@ -94,6 +94,16 @@ pub fn commit_all(
     Ok(Some(git(directory).args(["rev-parse", "HEAD"]).run(host)?.trim().to_owned()))
 }
 
+/// Merges `branch` into the checkout at `directory`. A conflict aborts the merge, leaving the
+/// checkout as it was, and is reported as the error.
+pub fn merge(host: &Host, directory: &Path, branch: &str) -> Result<(), HostError> {
+    let merged = git(directory).args(["merge", "--no-edit", "--quiet", branch]).run(host);
+    if merged.is_err() {
+        git(directory).args(["merge", "--abort"]).run(host).ok();
+    }
+    merged.map(drop)
+}
+
 /// Pushes `branch` to `origin` and sets it as the upstream.
 pub fn push(host: &Host, directory: &Path, branch: &str) -> Result<(), HostError> {
     git(directory).args(["push", "--quiet", "-u", "origin", branch]).run(host).map(drop)
@@ -138,6 +148,28 @@ mod tests {
         remove_worktree(&Host::Local, repo.path(), &worktree.path, false).unwrap();
         add_worktree(&Host::Local, repo.path(), &worktree).unwrap();
         assert!(worktree.path.join("a.txt").exists());
+    }
+
+    #[test]
+    fn merging_takes_a_branch_in_and_a_conflict_leaves_the_checkout_alone() {
+        let repo = repository();
+        let run = |args: &[&str]| git(repo.path()).args(args.iter().copied()).run(&Host::Local);
+        run(&["switch", "--quiet", "-c", "side"]).unwrap();
+        std::fs::write(repo.path().join("f"), "side").unwrap();
+        commit_all(&Host::Local, repo.path(), "side").unwrap();
+        run(&["switch", "--quiet", "main"]).unwrap();
+        run(&["switch", "--quiet", "-c", "other"]).unwrap();
+        std::fs::write(repo.path().join("g"), "other").unwrap();
+        commit_all(&Host::Local, repo.path(), "other").unwrap();
+        merge(&Host::Local, repo.path(), "side").unwrap();
+        assert!(repo.path().join("f").exists());
+
+        run(&["switch", "--quiet", "main"]).unwrap();
+        std::fs::write(repo.path().join("f"), "main").unwrap();
+        commit_all(&Host::Local, repo.path(), "clash").unwrap();
+        assert!(merge(&Host::Local, repo.path(), "side").is_err());
+        assert_eq!(std::fs::read_to_string(repo.path().join("f")).unwrap(), "main");
+        assert!(run(&["status", "--porcelain"]).unwrap().is_empty());
     }
 
     #[test]
