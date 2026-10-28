@@ -29,7 +29,8 @@ Maestro は、Claude Code、Codex、Antigravity CLI、OpenCode といったコ�
 ### 2. プロバイダ層と実行環境
 
 状況: 実装済み。Claude Code のアダプタは実機の CLI で、テキストの受信と権限要求の拒否まで確認しました。
-Codex、Antigravity CLI、OpenCode のアダプタは auris-studio と同じプロトコルで書き、記録したメッセージで
+Codex のアダプタは macOS 上の実機の CLI でテキストのターンを確認しました（2026-10-28）。
+Antigravity CLI と OpenCode のアダプタは auris-studio と同じプロトコルで書き、記録したメッセージで
 テストしています。ただ、実機ではまだ確認していません。特に Antigravity CLI については、ネイティブツールを
 使うときの権限要求の形式が未確認です。
 
