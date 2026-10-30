@@ -219,8 +219,11 @@ pub struct Choice {
     pub evidence: usize,
 }
 
+/// How many agents [`Router::max_agents`] lets run at once when router.json does not say.
+pub const DEFAULT_MAX_AGENTS: usize = 8;
+
 /// Picks models.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Router {
     /// The models to choose from.
     pub catalog: Catalog,
@@ -229,12 +232,40 @@ pub struct Router {
     /// When a node runs on several models at once.
     #[serde(default)]
     pub comparison: Comparison,
+    /// The most workers and leads in a turn at once, across every host; 0 for no limit. Work
+    /// past it waits its turn rather than failing, so it bounds how wide and how deep the
+    /// organisation grows at a time, and the organisation itself can be as deep as the work
+    /// needs. Commanders, who talk with the user, and a message the user sends to a node do not
+    /// wait for it.
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
     /// Providers the user has switched off: no work is routed to them even when installed.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub disabled: BTreeSet<ProviderKind>,
 }
 
+fn default_max_agents() -> usize {
+    DEFAULT_MAX_AGENTS
+}
+
+impl Default for Router {
+    fn default() -> Self {
+        Self {
+            catalog: Catalog::default(),
+            weights: Weights::default(),
+            comparison: Comparison::default(),
+            max_agents: DEFAULT_MAX_AGENTS,
+            disabled: BTreeSet::new(),
+        }
+    }
+}
+
 impl Router {
+    /// How many more agents may start a turn while `running` are in one; `None` for no limit.
+    pub fn room(&self, running: usize) -> Option<usize> {
+        (self.max_agents > 0).then(|| self.max_agents.saturating_sub(running))
+    }
+
     /// The providers of `installed` the user has not switched off.
     pub fn usable(&self, installed: &[ProviderKind]) -> Vec<ProviderKind> {
         installed.iter().copied().filter(|provider| !self.disabled.contains(provider)).collect()
@@ -435,6 +466,7 @@ mod tests {
             },
             weights: Weights::default(),
             comparison: Comparison::default(),
+            max_agents: DEFAULT_MAX_AGENTS,
             disabled: Default::default(),
         }
     }
@@ -444,6 +476,17 @@ mod tests {
 
     fn names(lineup: &[Choice]) -> Vec<&str> {
         lineup.iter().map(|choice| choice.model.model.as_str()).collect()
+    }
+
+    #[test]
+    fn the_limit_on_agents_leaves_room_until_it_is_reached() {
+        let mut router = router();
+        router.max_agents = 2;
+        assert_eq!((router.room(0), router.room(1), router.room(3)), (Some(2), Some(1), Some(0)));
+        router.max_agents = 0;
+        assert_eq!(router.room(100), None);
+        let old: Router = serde_json::from_str(r#"{"catalog":{"models":[]},"weights":{"prior_strength":3.0,"per_revision":0.1,"per_doubling":0.02}}"#).unwrap();
+        assert_eq!(old.max_agents, DEFAULT_MAX_AGENTS, "a router.json from before has the default");
     }
 
     #[test]

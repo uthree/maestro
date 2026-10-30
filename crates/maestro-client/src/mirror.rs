@@ -254,8 +254,8 @@ impl AgentView {
             AgentEvent::Prompted { .. } if self.status != AgentStatus::Exited => {
                 self.status = AgentStatus::Working;
             }
-            // The daemon refuses a commander's requests itself, and the turn carries on.
-            AgentEvent::PermissionRequested { .. } if self.spec.role != AgentRole::Commander => {
+            // The daemon refuses a planner's requests itself, and the turn carries on.
+            AgentEvent::PermissionRequested { .. } if !self.spec.role.plans() => {
                 self.status = AgentStatus::AwaitingPermission;
             }
             AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. } => {
@@ -265,7 +265,7 @@ impl AgentView {
             _ => {}
         }
         self.transcript.apply(event);
-        if self.spec.role == AgentRole::Commander {
+        if self.spec.role.plans() {
             self.transcript.close_permissions(false);
         }
     }

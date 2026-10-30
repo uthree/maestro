@@ -5,9 +5,10 @@
 //! transcript. Agent
 //! processes do not survive the daemon: a restored agent has exited, and a node whose worker was
 //! still busy when the daemon stopped has failed. A node that finished keeps its worktree and
-//! branch, so a later message to it starts a new worker there.
+//! branch, so a later message to it starts a new worker there. A delegated node whose lead had
+//! planned it keeps waiting for the work under it, which carries on without the lead.
 
-use maestro_core::{AgentEvent, AgentId, AgentSpec, NodeStatus, Project, Workflow};
+use maestro_core::{AgentEvent, AgentId, AgentSpec, NodeRef, NodeStatus, Project, Workflow};
 use serde::{Deserialize, Serialize};
 
 /// Everything in `state.json`.
@@ -35,11 +36,18 @@ impl Snapshot {
     /// Settles what was in flight when the snapshot was taken: busy nodes fail, and every agent
     /// has exited.
     pub(crate) fn settle(mut self) -> Self {
+        // A delegated node with work planned under it waits for that work, not for its lead.
+        let planned: Vec<NodeRef> = self.workflows.iter().filter_map(|flow| flow.parent).collect();
         for flow in &mut self.workflows {
+            let id = flow.id;
             let busy: Vec<_> = flow
                 .nodes()
                 .filter(|node| {
                     matches!(node.status, NodeStatus::Running | NodeStatus::AwaitingUser)
+                })
+                .filter(|node| {
+                    let reference = NodeRef { workflow: id, node: node.id };
+                    !(node.status == NodeStatus::Running && planned.contains(&reference))
                 })
                 .map(|node| node.id)
                 .collect();
@@ -87,11 +95,18 @@ mod tests {
             model: None,
             difficulty: None,
             tags: Vec::new(),
+            delegate: false,
             origin: NodeOrigin::User,
         };
         let (running, done) = (flow.add_node(draft("a")), flow.add_node(draft("b")));
         flow.set_status(running, NodeStatus::Running).unwrap();
         flow.set_status(done, NodeStatus::Succeeded).unwrap();
+        // A delegated node whose lead planned it, and one whose lead had not yet.
+        let (planned, planning) = (flow.add_node(draft("c")), flow.add_node(draft("d")));
+        flow.set_status(planned, NodeStatus::Running).unwrap();
+        flow.set_status(planning, NodeStatus::Running).unwrap();
+        let mut under = Workflow::new(WorkflowId(2), "under c");
+        under.parent = Some(NodeRef { workflow: WorkflowId(1), node: planned });
         let spec = AgentSpec {
             role: AgentRole::Worker,
             model: ModelChoice {
@@ -111,7 +126,7 @@ mod tests {
 
         let text = serde_json::to_string(&Snapshot {
             projects: Vec::new(),
-            workflows: vec![flow],
+            workflows: vec![flow, under],
             agents: vec![agent],
         })
         .unwrap();
@@ -120,6 +135,8 @@ mod tests {
         let flow = &settled.workflows[0];
         assert_eq!(flow.node(running).unwrap().status, NodeStatus::Failed);
         assert_eq!(flow.node(done).unwrap().status, NodeStatus::Succeeded);
+        assert_eq!(flow.node(planned).unwrap().status, NodeStatus::Running);
+        assert_eq!(flow.node(planning).unwrap().status, NodeStatus::Failed);
         assert_eq!(
             settled.agents[0].transcript.last(),
             Some(&AgentEvent::Exited { reason: Some(STOPPED.into()) })

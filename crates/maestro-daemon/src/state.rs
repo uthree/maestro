@@ -348,6 +348,7 @@ mod tests {
             model: None,
             difficulty: None,
             tags: Vec::new(),
+            delegate: false,
             origin: NodeOrigin::User,
         }
     }

@@ -792,6 +792,7 @@ impl Maestro {
             model: None,
             difficulty: Some(Difficulty::Moderate),
             tags: Vec::new(),
+            delegate: false,
             origin: NodeOrigin::User,
         };
         self.request(Command::AddNode { workflow, node }, cx, move |this, reply, _| {
@@ -984,7 +985,7 @@ impl Maestro {
             .agents
             .values()
             .filter(|view| {
-                view.spec.role == AgentRole::Worker && view.status == AgentStatus::Working
+                view.spec.role != AgentRole::Commander && view.status == AgentStatus::Working
             })
             .count();
         let notice = self.mirror.notices.last().map(|notice| match notice {

@@ -53,6 +53,7 @@ fn draft(title: &str, difficulty: Difficulty, tags: &[&str]) -> NodeDraft {
         model: None,
         difficulty: Some(difficulty),
         tags: tags.iter().map(|&tag| tag.to_owned()).collect(),
+        delegate: false,
         origin: NodeOrigin::User,
     }
 }

@@ -26,6 +26,19 @@
 //! for the user to pick whose work to keep ([`Command::ChooseContender`]); the pick is recorded
 //! as a win for that model and a loss for the others, the others stop, and the node succeeds
 //! with the chosen branch, so its dependents merge that work.
+//!
+//! A delegated node ([`Node::delegate`]) goes to a lead instead of a worker. The lead reads the
+//! node's worktree, made as in step 2, and writes a plan, which becomes a workflow under the node
+//! ([`Workflow::parent`]) whose nodes branch from the node's branch. Its nodes may be delegated
+//! in turn, to any depth. Once every workflow under the node has succeeded, their work is merged
+//! into the node's branch and the node succeeds, so its own dependents start as with a worker's.
+//!
+//! No more than [`Router::max_agents`] workers and leads are in a turn at once. A ready node
+//! past the limit stays pending and starts when another agent's turn ends. A lead waiting for
+//! the workflow under it is between turns, so it takes no room, and however deep the
+//! organisation goes the work under it can always start.
+//!
+//! [`Router::max_agents`]: maestro_core::Router::max_agents
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,9 +49,9 @@ use std::time::Instant;
 
 use maestro_core::{
     AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Checkout, Contender,
-    Difficulty, Host, ModelChoice, ModelKey, Node, NodeId, NodeStatus, Outcome, Placement, Plan,
-    Project, ProjectId, ProviderKind, ResourceId, WORKER_INSTRUCTIONS, Workflow, WorkflowId,
-    WorkflowTarget, Workspace, Worktree,
+    Difficulty, Host, LEAD_INSTRUCTIONS, ModelChoice, ModelKey, Node, NodeId, NodeRef, NodeStatus,
+    Outcome, Placement, Plan, Project, ProjectId, ProviderKind, ResourceId, WORKER_INSTRUCTIONS,
+    Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
 };
 use maestro_host::git;
 use maestro_host::github::{self, PullRequestDraft};
@@ -52,6 +65,8 @@ use crate::{Inner, broadcast};
 pub(crate) enum Job {
     Command(Box<Command>, Sender<Result<Reply, CommandError>>),
     Agent(AgentId, AgentEvent),
+    /// Starts the work a restored state left ready, such as nodes that were waiting for room.
+    Resume,
 }
 
 /// Whether `command` belongs to the engine.
@@ -90,6 +105,31 @@ struct Worker {
     busy: bool,
 }
 
+/// An agent planning a delegated node.
+struct Lead {
+    /// The node it plans.
+    node: NodeRef,
+    /// In a turn, so taking room under the limit on agents.
+    busy: bool,
+}
+
+/// Who wrote a plan, which decides where the plan's workflow runs.
+#[derive(Clone, Copy)]
+enum Planner {
+    /// A project's commander, who names the project's resources.
+    Commander(ProjectId),
+    /// A lead, whose plan works on its node's branch.
+    Lead(NodeRef),
+}
+
+/// What became of the plans in a reply.
+struct Adopted {
+    /// How many became workflows.
+    workflows: usize,
+    /// Whether the planner was asked to write one again.
+    rejected: bool,
+}
+
 /// What every worker on a node starts from.
 struct Brief {
     /// The work merged into its worktree first: a branch, the title an error names it by, and
@@ -106,6 +146,8 @@ struct Engine {
     workers: HashMap<AgentId, Worker>,
     /// Each running commander, with the project it leads.
     commanders: HashMap<AgentId, ProjectId>,
+    /// Each running lead.
+    leads: HashMap<AgentId, Lead>,
     /// Which CLIs each host has.
     providers: Arc<Providers>,
     published: Vec<WorkflowId>,
@@ -129,6 +171,7 @@ pub(crate) fn spawn(
         store,
         workers: HashMap::new(),
         commanders: HashMap::new(),
+        leads: HashMap::new(),
         providers,
         published: Vec::new(),
     };
@@ -139,6 +182,7 @@ pub(crate) fn spawn(
                     reply.send(engine.execute(*command)).ok();
                 }
                 Job::Agent(agent, event) => engine.observe(agent, event),
+                Job::Resume => engine.advance_all(),
             }
         }
     });
@@ -163,6 +207,11 @@ impl Engine {
                     .ok_or_else(|| refused(format!("node {node} is not in this workflow")))?
                     .agent
                     .ok_or_else(|| refused("the node has not started; edit it instead"))?;
+                if let Some(lead) = self.leads.get_mut(&agent) {
+                    lead.busy = true;
+                    self.set_status(workflow, node, NodeStatus::Running);
+                    return self.runtime.execute(Command::SendToAgent { agent, text });
+                }
                 let Some(worker) = self.workers.get_mut(&agent) else {
                     // Its worker has exited, perhaps with an earlier daemon: start another.
                     return self.revive(workflow, node, text);
@@ -222,6 +271,8 @@ impl Engine {
                     &mut self.inner.lock().expect("hub lock"),
                     &Event::RouterChanged { router },
                 );
+                // A higher limit on agents lets waiting work start.
+                self.advance_all();
                 Ok(Reply::Done)
             }
             Command::PublishWorkflow { workflow } => self.publish(workflow),
@@ -230,9 +281,11 @@ impl Engine {
     }
 
     fn observe(&mut self, agent: AgentId, event: AgentEvent) {
-        if self.commanders.contains_key(&agent) {
+        if let Some(&project) = self.commanders.get(&agent) {
             match event {
-                AgentEvent::TurnCompleted { answer } => self.adopt_plans(agent, &answer),
+                AgentEvent::TurnCompleted { answer } => {
+                    self.adopt_plans(agent, Planner::Commander(project), &answer);
+                }
                 AgentEvent::Exited { .. } => {
                     self.commanders.remove(&agent);
                 }
@@ -240,6 +293,23 @@ impl Engine {
             }
             return;
         }
+        if self.leads.contains_key(&agent) {
+            return self.observe_lead(agent, event);
+        }
+        let ended = matches!(
+            event,
+            AgentEvent::TurnCompleted { .. }
+                | AgentEvent::TurnFailed { .. }
+                | AgentEvent::Exited { .. }
+        );
+        self.observe_worker(agent, event);
+        if ended {
+            // Its turn has ended, so another agent has room to start.
+            self.advance_all();
+        }
+    }
+
+    fn observe_worker(&mut self, agent: AgentId, event: AgentEvent) {
         let Some(worker) = self.workers.get(&agent) else { return };
         let (workflow, node, contender) = (worker.workflow, worker.node, worker.contender);
         match event {
@@ -268,6 +338,9 @@ impl Engine {
             }
             AgentEvent::TurnCompleted { .. } => self.finish(agent),
             AgentEvent::TurnFailed { message } => {
+                if let Some(worker) = self.workers.get_mut(&agent) {
+                    worker.busy = false;
+                }
                 self.record(agent, false);
                 if contender {
                     self.settle(agent, NodeStatus::Failed);
@@ -291,6 +364,113 @@ impl Engine {
             }
             _ => {}
         }
+    }
+
+    fn observe_lead(&mut self, agent: AgentId, event: AgentEvent) {
+        let Some(lead) = self.leads.get(&agent) else { return };
+        let node = lead.node;
+        let status = self.inner.lock().expect("hub lock").state.status(node);
+        match event {
+            AgentEvent::Prompted { .. } => {
+                if let Some(lead) = self.leads.get_mut(&agent) {
+                    lead.busy = true;
+                }
+                if matches!(status, Some(NodeStatus::AwaitingUser | NodeStatus::Failed)) {
+                    self.set_status(node.workflow, node.node, NodeStatus::Running);
+                }
+            }
+            AgentEvent::TurnCompleted { answer } => {
+                if let Some(lead) = self.leads.get_mut(&agent) {
+                    lead.busy = false;
+                }
+                let adopted = self.adopt_plans(agent, Planner::Lead(node), &answer);
+                if adopted.rejected {
+                    // Asked to write it again, so in a turn once more.
+                    if let Some(lead) = self.leads.get_mut(&agent) {
+                        lead.busy = true;
+                    }
+                } else if adopted.workflows == 0 && self.under(node).is_empty() {
+                    // No plan and nothing under way: it is asking the user something.
+                    self.set_status(node.workflow, node.node, NodeStatus::AwaitingUser);
+                } else {
+                    self.complete(node);
+                }
+                self.advance_all();
+            }
+            AgentEvent::TurnFailed { message } => {
+                if let Some(lead) = self.leads.get_mut(&agent) {
+                    lead.busy = false;
+                }
+                if self.under(node).is_empty() {
+                    self.fail(node.workflow, node.node, message);
+                }
+                self.advance_all();
+            }
+            AgentEvent::Exited { reason } => {
+                self.leads.remove(&agent);
+                // Once it has planned, the work under it carries on without it.
+                let planning =
+                    matches!(status, Some(NodeStatus::Running | NodeStatus::AwaitingUser));
+                if planning && self.under(node).is_empty() {
+                    let message = reason.unwrap_or_else(|| "the lead exited".into());
+                    self.fail(node.workflow, node.node, message);
+                }
+                self.advance_all();
+            }
+            _ => {}
+        }
+    }
+
+    /// The workflows planned for a delegated node, oldest first.
+    fn under(&self, node: NodeRef) -> Vec<Workflow> {
+        let inner = self.inner.lock().expect("hub lock");
+        inner.state.workflows().into_iter().filter(|flow| flow.parent == Some(node)).collect()
+    }
+
+    /// Succeeds a delegated node once every workflow under it has, with their work merged into
+    /// its branch, and starts what waits on it.
+    fn complete(&mut self, node: NodeRef) {
+        let under = self.under(node);
+        let done = |flow: &Workflow| flow.nodes().all(|n| n.status == NodeStatus::Succeeded);
+        if under.is_empty() || !under.iter().all(done) {
+            return;
+        }
+        // Its lead is answering the user, who may be asking for more; it settles when it ends.
+        let Ok(flow) = self.snapshot(node.workflow) else { return };
+        let Some(delegated) = flow.node(node.node) else { return };
+        if delegated.status == NodeStatus::Succeeded
+            || delegated
+                .agent
+                .and_then(|agent| self.leads.get(&agent))
+                .is_some_and(|lead| lead.busy)
+        {
+            return;
+        }
+        let (Some(target), Some(branch)) = (&flow.target, &delegated.branch) else { return };
+        let workspace = node_workspace(target, branch);
+        if let Err(error) = prepare_worktree(&workspace) {
+            return self.fail(node.workflow, node.node, error.to_string());
+        }
+        let path = workspace.working_directory();
+        for child in &under {
+            for id in child.topological_order() {
+                let Some(step) = child.node(id) else { continue };
+                let Some(theirs) = &step.branch else { continue };
+                if let Err(error) = git::merge(&target.host, path, theirs) {
+                    let message =
+                        format!("merging the work of {:?} conflicted: {error}", step.title);
+                    return self.fail(node.workflow, node.node, message);
+                }
+            }
+        }
+        self.set_status(node.workflow, node.node, NodeStatus::Succeeded);
+        self.succeeded(node.workflow);
+    }
+
+    /// How many workers and leads are in a turn.
+    fn running(&self) -> usize {
+        self.workers.values().filter(|worker| worker.busy).count()
+            + self.leads.values().filter(|lead| lead.busy).count()
     }
 
     /// Where a worker's work stands: its contender's status while it is one, else its node's.
@@ -394,6 +574,9 @@ impl Engine {
         let Ok(flow) = self.snapshot(workflow) else { return };
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
         let done = flow.nodes().all(|node| node.status == NodeStatus::Succeeded);
+        if let Some(parent) = flow.parent.filter(|_| done) {
+            self.complete(parent);
+        }
         if publish
             && done
             && !self.published.contains(&workflow)
@@ -422,13 +605,19 @@ impl Engine {
             flow.ready(|other| inner.state.status(other) == Some(NodeStatus::Succeeded))
         };
         for node in ready {
-            if let Err(message) = self.launch(&flow, node) {
+            let room = self.store.router.room(self.running());
+            if room == Some(0) {
+                // The rest start as turns end.
+                return;
+            }
+            if let Err(message) = self.launch(&flow, node, room) {
                 self.fail(workflow, node, message);
             }
         }
     }
 
-    fn launch(&mut self, flow: &Workflow, id: NodeId) -> Result<(), String> {
+    /// Starts a ready node with at most `room` agents, or as many as it wants for `None`.
+    fn launch(&mut self, flow: &Workflow, id: NodeId, room: Option<usize>) -> Result<(), String> {
         let target = flow.target.clone().ok_or("the workflow has no target")?;
         let node = flow.node(id).ok_or("the node is gone")?;
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
@@ -451,11 +640,15 @@ impl Engine {
                 let busy = self.busy(&target.host);
                 let outcomes = self.store.outcomes();
                 let router = &self.store.router;
-                router
+                let mut lineup: Vec<ModelChoice> = router
                     .lineup(difficulty, &node.tags, &outcomes, &available, &busy)
                     .into_iter()
                     .map(|choice| choice.model)
-                    .collect()
+                    .collect();
+                // A lead plans; there is nothing to compare until its workers have worked.
+                let most = if node.delegate { 1 } else { room.unwrap_or(usize::MAX).max(1) };
+                lineup.truncate(most);
+                lineup
             }
         };
         if models.is_empty() {
@@ -493,6 +686,12 @@ impl Engine {
 
         let brief = Brief { merges, prompt };
         let branch = format!("maestro/{}-{}", flow.id, id);
+        if node.delegate {
+            let model = models[0].clone();
+            let agent = self.start_lead(flow, node, &model, &branch, &brief)?;
+            self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
+            return Ok(());
+        }
         if let [model] = &models[..] {
             let agent = self.start_worker(flow, node, model, &branch, &brief, false)?;
             let model = model.clone();
@@ -542,14 +741,8 @@ impl Engine {
         contender: bool,
     ) -> Result<AgentId, String> {
         let target = flow.target.as_ref().ok_or("the workflow has no target")?;
-        let workspace = node_workspace(target, branch);
-        prepare_worktree(&workspace).map_err(|error| error.to_string())?;
+        let workspace = merged_worktree(target, branch, brief)?;
         let path = workspace.working_directory().clone();
-        for (theirs, title, _) in &brief.merges {
-            git::merge(&target.host, &path, theirs)
-                .map_err(|error| format!("merging the work of {title:?} conflicted: {error}"))?;
-        }
-
         let spec = AgentSpec {
             role: AgentRole::Worker,
             model: model.clone(),
@@ -585,6 +778,33 @@ impl Engine {
         Ok(agent)
     }
 
+    /// Makes a worktree on `branch` with the node's dependencies merged in, and starts a lead
+    /// there to plan the node.
+    fn start_lead(
+        &mut self,
+        flow: &Workflow,
+        node: &Node,
+        model: &ModelChoice,
+        branch: &str,
+        brief: &Brief,
+    ) -> Result<AgentId, String> {
+        let target = flow.target.as_ref().ok_or("the workflow has no target")?;
+        let workspace = merged_worktree(target, branch, brief)?;
+        let spec = AgentSpec {
+            role: AgentRole::Lead,
+            model: model.clone(),
+            workspace,
+            project: flow.project,
+        };
+        let agent = self
+            .runtime
+            .start(spec, LEAD_INSTRUCTIONS.into(), &brief.prompt)
+            .map_err(|error| error.to_string())?;
+        let node = NodeRef { workflow: flow.id, node: node.id };
+        self.leads.insert(agent, Lead { node, busy: true });
+        Ok(agent)
+    }
+
     /// The provider of every worker in a turn on `host`, once per worker.
     fn busy(&self, host: &Host) -> Vec<ProviderKind> {
         self.workers
@@ -612,6 +832,25 @@ impl Engine {
         let workspace = node_workspace(&target, &branch);
         prepare_worktree(&workspace).map_err(failed)?;
         let path = workspace.working_directory().clone();
+        if node.delegate {
+            let prompt = format!(
+                "This step is part of \"{}\". You planned it before, and the work of that plan is \
+                 merged into this branch as far as it got.\n\n# {}\n\n{}\n\n# What the user asks \
+                 now\n\n{text}",
+                flow.title, node.title, node.instructions
+            );
+            let spec = AgentSpec {
+                role: AgentRole::Lead,
+                model: model.clone(),
+                workspace,
+                project: flow.project,
+            };
+            let agent = self.runtime.start(spec, LEAD_INSTRUCTIONS.into(), &prompt)?;
+            let reference = NodeRef { workflow, node: id };
+            self.leads.insert(agent, Lead { node: reference, busy: true });
+            self.update(workflow, |flow| flow.assign(id, agent, model, branch).ok())?;
+            return Ok(Reply::Done);
+        }
         let prompt = format!(
             "This step is part of \"{}\". You worked on it before, and that work is committed on \
              this branch.\n\n# {}\n\n{}\n\n# What the user asks now\n\n{text}",
@@ -691,29 +930,31 @@ impl Engine {
         Ok(Reply::PullRequestOpened { number: opened.number, url: opened.url, commit: None })
     }
 
-    /// Turns every plan in a commander's reply into a workflow, and tells the commander about
-    /// any it got wrong so it can write them again.
-    fn adopt_plans(&mut self, agent: AgentId, answer: &str) {
-        let Some(&project) = self.commanders.get(&agent) else { return };
+    /// Turns every plan in a commander's or a lead's reply into a workflow, and tells the
+    /// planner about any it got wrong so it can write them again.
+    fn adopt_plans(&mut self, agent: AgentId, planner: Planner, answer: &str) -> Adopted {
         let mut adopted = Vec::new();
+        let mut rejected = false;
         for plan in Plan::extract(answer) {
             // Placing the plan may clone a repository, so it happens before the lock is taken.
             let placed = plan.map_err(|error| error.to_string()).and_then(|plan| {
-                let (resource, machine) = plan.resources().map_err(|error| error.to_string())?;
-                let target =
-                    self.place(project, resource, machine).map_err(|error| error.to_string())?;
-                Ok((plan, target))
+                let (project, target) = self.plan_target(planner, &plan)?;
+                Ok((plan, project, target))
             });
             let mut inner = self.inner.lock().expect("hub lock");
-            let built = placed.and_then(|(plan, target)| {
+            let built = placed.and_then(|(plan, project, target)| {
                 let state = &inner.state;
                 let mut workflow = plan
                     .into_workflow(state.next_id(), target, |other| state.contains(other))
                     .map_err(|error| error.to_string())?;
-                // The user agreed to the plan before the commander wrote it: set it going.
+                // The user agreed to the plan before the commander wrote it, and a lead's plan
+                // is the work it was given: set it going.
                 workflow.started = workflow.target.is_some();
                 workflow.planned_by = Some(agent);
-                workflow.project = Some(project);
+                workflow.project = project;
+                if let Planner::Lead(node) = planner {
+                    workflow.parent = Some(node);
+                }
                 Ok(inner.state.insert(workflow).clone())
             });
             match built {
@@ -730,11 +971,44 @@ impl Engine {
                         "Maestro could not use that plan: {message}. Please write the whole plan again."
                     );
                     self.runtime.execute(Command::SendToAgent { agent, text }).ok();
+                    rejected = true;
                 }
             }
         }
-        for workflow in adopted {
+        if let (Planner::Lead(node), false) = (planner, adopted.is_empty()) {
+            // More work under the node: it is running again until that is done too.
+            self.set_status(node.workflow, node.node, NodeStatus::Running);
+        }
+        for &workflow in &adopted {
             self.advance(workflow);
+        }
+        Adopted { workflows: adopted.len(), rejected }
+    }
+
+    /// The project a plan belongs to and where it runs: on the resources a commander names, or
+    /// for a lead's, in its node's repository from the node's branch.
+    fn plan_target(
+        &mut self,
+        planner: Planner,
+        plan: &Plan,
+    ) -> Result<(Option<ProjectId>, Option<WorkflowTarget>), String> {
+        match planner {
+            Planner::Commander(project) => {
+                let (resource, machine) = plan.resources().map_err(|error| error.to_string())?;
+                let target =
+                    self.place(project, resource, machine).map_err(|error| error.to_string())?;
+                Ok((Some(project), target))
+            }
+            Planner::Lead(node) => {
+                let flow = self.snapshot(node.workflow).map_err(|error| error.to_string())?;
+                let branch = flow
+                    .node(node.node)
+                    .and_then(|node| node.branch.clone())
+                    .ok_or("the step being planned has no branch")?;
+                let target = flow.target.clone().ok_or("the step's workflow has no target")?;
+                let target = WorkflowTarget { base: branch, publish: false, ..target };
+                Ok((flow.project, Some(target)))
+            }
         }
     }
 
@@ -899,6 +1173,22 @@ fn refused_by_project(message: impl Into<String>) -> CommandError {
 
 fn refused(message: impl Into<String>) -> CommandError {
     CommandError::Workflow { message: message.into() }
+}
+
+/// Makes the worktree a node's work lives in on `branch`, with the work it builds on merged in.
+fn merged_worktree(
+    target: &WorkflowTarget,
+    branch: &str,
+    brief: &Brief,
+) -> Result<Workspace, String> {
+    let workspace = node_workspace(target, branch);
+    prepare_worktree(&workspace).map_err(|error| error.to_string())?;
+    let path = workspace.working_directory();
+    for (theirs, title, _) in &brief.merges {
+        git::merge(&target.host, path, theirs)
+            .map_err(|error| format!("merging the work of {title:?} conflicted: {error}"))?;
+    }
+    Ok(workspace)
 }
 
 /// The worktree a node's work lives in, on its own branch beside the workflow's repository.
