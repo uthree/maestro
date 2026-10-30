@@ -7,12 +7,16 @@
 //!
 //! A node's life:
 //!
-//! 1. It becomes ready when every node it depends on has succeeded.
+//! 1. It becomes ready when every node it depends on has succeeded, and every node of an earlier
+//!    workflow it waits on too. A commander's plan is set going as soon as it is adopted, so work
+//!    asked for while other work runs starts by itself once what it builds on is done.
 //! 2. The router picks its model, unless the user or commander fixed one; a worktree is made on
-//!    its own branch from the workflow's base, and its dependencies' branches are merged in.
+//!    its own branch from the workflow's base, and its dependencies' branches are merged in, with
+//!    those of the earlier workflows' nodes it waits on in the same repository.
 //! 3. A worker starts there with the node's instructions.
 //! 4. When the worker's turn completes, its changes are committed on the node's branch, the node
-//!    succeeds, its outcome is recorded for the router, and the nodes waiting on it start.
+//!    succeeds, its outcome is recorded for the router, and the nodes waiting on it start, in
+//!    whichever workflow they are.
 //! 5. A message from the user to the node reopens it and counts as a revision request; the next
 //!    completion commits again and updates the outcome.
 //!
@@ -80,6 +84,15 @@ struct Worker {
     busy: bool,
 }
 
+/// What every worker on a node starts from.
+struct Brief {
+    /// The work merged into its worktree first: a branch, the title an error names it by, and
+    /// how the worker is told about it.
+    merges: Vec<(String, String, String)>,
+    /// Its first message.
+    prompt: String,
+}
+
 struct Engine {
     inner: Arc<Mutex<Inner>>,
     runtime: Arc<Runtime>,
@@ -128,6 +141,7 @@ impl Engine {
                 if self.snapshot(workflow)?.target.is_none() {
                     return Err(refused("set the workflow's target before running it"));
                 }
+                self.update(workflow, |flow| flow.started = true)?;
                 self.advance(workflow);
                 Ok(Reply::Done)
             }
@@ -197,6 +211,14 @@ impl Engine {
         match event {
             AgentEvent::PermissionRequested { .. } if contender => {
                 self.settle(agent, NodeStatus::AwaitingUser);
+            }
+            // A message the user sent during the turn that just finished opens the node again.
+            AgentEvent::Prompted { .. } if !contender => {
+                let status =
+                    self.snapshot(workflow).ok().and_then(|flow| flow.node(node).map(|n| n.status));
+                if matches!(status, Some(NodeStatus::Succeeded | NodeStatus::Failed)) {
+                    self.set_status(workflow, node, NodeStatus::Running);
+                }
             }
             AgentEvent::PermissionRequested { .. } => {
                 self.set_status(workflow, node, NodeStatus::AwaitingUser);
@@ -333,7 +355,7 @@ impl Engine {
 
     /// Starts what a node's success let start, and publishes a workflow that is now done.
     fn succeeded(&mut self, workflow: WorkflowId) {
-        self.advance(workflow);
+        self.advance_all();
 
         let Ok(flow) = self.snapshot(workflow) else { return };
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
@@ -347,10 +369,25 @@ impl Engine {
         }
     }
 
+    /// Starts every ready node of every workflow that has been set going.
+    fn advance_all(&mut self) {
+        let started: Vec<WorkflowId> = {
+            let inner = self.inner.lock().expect("hub lock");
+            inner.state.workflows().iter().filter(|flow| flow.started).map(|flow| flow.id).collect()
+        };
+        for workflow in started {
+            self.advance(workflow);
+        }
+    }
+
     /// Starts every ready node of a workflow.
     fn advance(&mut self, workflow: WorkflowId) {
         let Ok(flow) = self.snapshot(workflow) else { return };
-        for node in flow.ready() {
+        let ready = {
+            let inner = self.inner.lock().expect("hub lock");
+            flow.ready(|other| inner.state.status(other) == Some(NodeStatus::Succeeded))
+        };
+        for node in ready {
             if let Err(message) = self.launch(&flow, node) {
                 self.fail(workflow, node, message);
             }
@@ -379,21 +416,36 @@ impl Engine {
             return Err("no model in the router's catalog is installed on the host".into());
         }
 
-        let done: Vec<&str> = flow
-            .dependencies(id)
-            .filter_map(|dependency| flow.node(dependency))
-            .filter(|dependency| dependency.branch.is_some())
-            .map(|dependency| dependency.title.as_str())
-            .collect();
+        // The work to merge into each worktree first: what it depends on in this workflow, and
+        // earlier work it waits on when that is in the same repository. Each is a branch, the
+        // title to name it by in an error, and how the worker is told about it.
+        let mut merges: Vec<(String, String, String)> = Vec::new();
+        for dependency in flow.dependencies(id) {
+            let dependency = flow.node(dependency).ok_or("a dependency is gone")?;
+            let Some(theirs) = &dependency.branch else { continue };
+            merges.push((theirs.clone(), dependency.title.clone(), dependency.title.clone()));
+        }
+        for other in &node.after {
+            let Ok(earlier) = self.snapshot(other.workflow) else { continue };
+            let same = earlier.target.as_ref().is_some_and(|theirs| {
+                theirs.host == target.host && theirs.repository == target.repository
+            });
+            let Some(dependency) = earlier.node(other.node).filter(|_| same) else { continue };
+            let Some(theirs) = &dependency.branch else { continue };
+            let told = format!("{} (from \"{}\")", dependency.title, earlier.title);
+            merges.push((theirs.clone(), dependency.title.clone(), told));
+        }
+        let done: Vec<&str> = merges.iter().map(|(_, _, told)| told.as_str()).collect();
         let mut prompt = format!("This step is part of \"{}\".", flow.title);
         if !done.is_empty() {
             prompt.push_str(&format!(" Already done and merged here: {}.", done.join(", ")));
         }
         prompt.push_str(&format!("\n\n# {}\n\n{}", node.title, node.instructions));
 
+        let brief = Brief { merges, prompt };
         let branch = format!("maestro/{}-{}", flow.id, id);
         if let [model] = &models[..] {
-            let agent = self.start_worker(flow, node, model, &branch, &prompt, false)?;
+            let agent = self.start_worker(flow, node, model, &branch, &brief, false)?;
             let model = model.clone();
             self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
             return Ok(());
@@ -403,7 +455,7 @@ impl Engine {
         let mut errors = Vec::new();
         for (index, model) in models.into_iter().enumerate() {
             let branch = format!("{branch}-c{}", index + 1);
-            match self.start_worker(flow, node, &model, &branch, &prompt, true) {
+            match self.start_worker(flow, node, &model, &branch, &brief, true) {
                 Ok(agent) => {
                     contenders.push(Contender { agent, model, branch, status: NodeStatus::Running })
                 }
@@ -437,25 +489,22 @@ impl Engine {
         node: &Node,
         model: &ModelChoice,
         branch: &str,
-        prompt: &str,
+        brief: &Brief,
         contender: bool,
     ) -> Result<AgentId, String> {
         let target = flow.target.as_ref().ok_or("the workflow has no target")?;
         let workspace = node_workspace(target, branch);
         prepare_worktree(&workspace).map_err(|error| error.to_string())?;
         let path = workspace.working_directory().clone();
-        for dependency in flow.dependencies(node.id) {
-            let dependency = flow.node(dependency).ok_or("a dependency is gone")?;
-            let Some(theirs) = &dependency.branch else { continue };
-            git::merge(&target.host, &path, theirs).map_err(|error| {
-                format!("merging the work of {:?} conflicted: {error}", dependency.title)
-            })?;
+        for (theirs, title, _) in &brief.merges {
+            git::merge(&target.host, &path, theirs)
+                .map_err(|error| format!("merging the work of {title:?} conflicted: {error}"))?;
         }
 
         let spec = AgentSpec { role: AgentRole::Worker, model: model.clone(), workspace };
         let agent = self
             .runtime
-            .start(spec, WORKER_INSTRUCTIONS.into(), prompt)
+            .start(spec, WORKER_INSTRUCTIONS.into(), &brief.prompt)
             .map_err(|error| error.to_string())?;
         let key = if contender {
             contender_key(flow.id, node.id, agent)
@@ -587,16 +636,26 @@ impl Engine {
     /// any it got wrong so it can write them again.
     fn adopt_plans(&mut self, agent: AgentId, answer: &str) {
         let target = self.commanders.get(&agent).cloned().flatten();
+        let mut adopted = Vec::new();
         for plan in Plan::extract(answer) {
             let mut inner = self.inner.lock().expect("hub lock");
             let built = plan.and_then(|plan| {
-                inner.state.insert(|id| plan.into_workflow(id, target.clone())).cloned()
+                let state = &inner.state;
+                let mut workflow =
+                    plan.into_workflow(state.next_id(), target.clone(), |other| {
+                        state.contains(other)
+                    })?;
+                // The user agreed to the plan before the commander wrote it: set it going.
+                workflow.started = workflow.target.is_some();
+                workflow.planned_by = Some(agent);
+                Ok(inner.state.insert(workflow).clone())
             });
             match built {
                 Ok(workflow) => {
                     let id = workflow.id;
                     broadcast(&mut inner, &Event::WorkflowChanged { workflow });
                     broadcast(&mut inner, &Event::Planned { agent, workflow: id });
+                    adopted.push(id);
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -608,6 +667,9 @@ impl Engine {
                     self.runtime.execute(Command::SendToAgent { agent, text }).ok();
                 }
             }
+        }
+        for workflow in adopted {
+            self.advance(workflow);
         }
     }
 

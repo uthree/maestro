@@ -22,7 +22,7 @@ maestro-protocol.workspace = true
 # the Command Line Tools installed.
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 # Atelier, the design language, pinned to a reviewed revision of its main branch.
-atelier = { git = "https://github.com/uthree/design-language", rev = "ae5b23ed61b23e6e0366c9aeaaae134c009da0c3" }
+atelier = { git = "https://github.com/uthree/design-language", rev = "45b7d79c34b335211c5507a873fcd7bea9db0033" }
 # Only for its text input (caret, selection, IME); Atelier ships no editor. Later releases need
 # gpui snapshots, and 0.5.1 is the last on gpui 0.2.2.
 gpui-component = "=0.5.1"
@@ -30,6 +30,8 @@ gpui-component = "=0.5.1"
 futures = "0.3"
 # `RUST_LOG=info maestro` shows what gpui says about the window and the GPU.
 env_logger = "0.11"
+# The system language, which picks between the English and Japanese strings.
+sys-locale = "0.3.2"
 
 [lints]
 workspace = true

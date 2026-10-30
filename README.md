@@ -32,9 +32,12 @@ On this machine the daemon is part of the `maestro` executable and starts by its
 nothing else to build, start or stop. With `--ssh`, the server needs `maestro-daemon` installed
 (see below).
 
-Ask the commander what to build in the panel on the right. Its plan appears as a graph of steps;
-edit them (title, instructions, difficulty, provider, dependencies), then press Run. Select a
-step to see its worker, answer its permission requests, or ask it for changes. When every step
+Ask the commander what to build in the conversation in the middle of the window. Its plan
+appears in the conversation as a card listing the steps, with Run beside it. "Open workflow"
+opens the plan as a graph beside the conversation (or in its place, on a narrow window or with
+the expand button); there you can edit the steps (title, instructions, difficulty, provider,
+dependencies). Select a step to see its worker, answer its permission requests, or ask it for
+changes. When every step
 has succeeded, "Open pull request" merges them and opens one pull request.
 
 `--appearance light` and `--direction studio|mono` change the theme. On Linux, building needs

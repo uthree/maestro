@@ -18,10 +18,12 @@ use maestro_core::{
 use maestro_daemon::Hub;
 use maestro_protocol::{Command, Event, Reply};
 
-/// As commander (started with `--disallowedTools`), replies with a two-step plan. As worker,
-/// leaves a file named after its worktree and a list of what it found there, then on each later
-/// message leaves another file.
-fn fake_claude(plan: &str) -> String {
+/// As commander (started with `--disallowedTools`), replies with a two-step plan, then keeps
+/// what it is told next in `$MAESTRO_TEST_DIR/briefed` and replies with a plan that builds on the
+/// first. As worker, leaves a file named after its worktree and a list of what it found there,
+/// then on each later message leaves another file. A worker told to WAIT first waits for
+/// `$MAESTRO_TEST_DIR/gate`.
+fn fake_claude(plan: &str, more: &str) -> String {
     format!(
         r#"#!/bin/sh
 case "$*" in
@@ -30,10 +32,18 @@ case "$*" in
     cat <<'PLAN'
 {plan}
 PLAN
-    read next
+    read -r next
+    printf '%s' "$next" > "$MAESTRO_TEST_DIR/briefed"
+    cat <<'PLAN'
+{more}
+PLAN
+    read last
     exit 0 ;;
 esac
 read prompt
+case "$prompt" in
+  *WAIT*) while [ ! -e "$MAESTRO_TEST_DIR/gate" ]; do sleep 0.1; done ;;
+esac
 here=$(basename "$PWD")
 ls > "$here.seen"
 touch "$here.txt"
@@ -74,16 +84,29 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
         "type": "result", "subtype": "success", "is_error": false,
         "result": "Agreed. Here is the plan:\n```maestro-plan\n{\"title\": \"Two steps\", \"nodes\": [
             {\"key\": \"a\", \"title\": \"First\", \"instructions\": \"Do a\", \"difficulty\": \"easy\", \"depends_on\": []},
-            {\"key\": \"b\", \"title\": \"Second\", \"instructions\": \"Do b\", \"difficulty\": \"hard\", \"depends_on\": [\"a\"]}
+            {\"key\": \"b\", \"title\": \"Second\", \"instructions\": \"Do b, but WAIT\", \"difficulty\": \"hard\", \"depends_on\": [\"a\"]}
+        ]}\n```"
+    });
+    // Asked for while the first plan is still running: one step builds on its second step, and
+    // one needs nothing.
+    let more = serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "result": "Queued:\n```maestro-plan\n{\"title\": \"Follow-up\", \"nodes\": [
+            {\"key\": \"c\", \"title\": \"Third\", \"instructions\": \"Do c\", \"after\": [\"wf1/n2\"]},
+            {\"key\": \"d\", \"title\": \"Aside\", \"instructions\": \"Do d\"}
         ]}\n```"
     });
     let bin = tempfile::tempdir().unwrap();
     let claude = bin.path().join("claude");
-    std::fs::write(&claude, fake_claude(&plan.to_string())).unwrap();
+    std::fs::write(&claude, fake_claude(&plan.to_string(), &more.to_string())).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
-    // SAFETY: this test binary runs this one test, and sets PATH before starting any thread.
-    unsafe { std::env::set_var("PATH", path) };
+    let scratch = tempfile::tempdir().unwrap();
+    // SAFETY: this test binary runs this one test, and sets these before starting any thread.
+    unsafe {
+        std::env::set_var("PATH", path);
+        std::env::set_var("MAESTRO_TEST_DIR", scratch.path());
+    }
 
     let repository = tempfile::tempdir().unwrap();
     git(repository.path(), &["init", "--quiet", "--initial-branch=main"]);
@@ -135,15 +158,39 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
             prompt: "Plan two steps".into(),
         })
         .unwrap();
-    assert!(matches!(commander, Reply::AgentStarted { .. }));
+    let Reply::AgentStarted { agent: commander } = commander else { panic!("{commander:?}") };
     let planned = until(&events, |flow| flow.nodes().count() == 2);
     assert_eq!(planned.title, "Two steps");
     assert_eq!(planned.topological_order(), [NodeId(1), NodeId(2)]);
     let workflow = planned.id;
 
-    client.request(Command::RunWorkflow { workflow }).unwrap();
-    let done = until(&events, |flow| status(flow, 2) == NodeStatus::Succeeded);
+    // The plan runs without being asked to. While its second step works, the user asks for more;
+    // the commander reads where the work is first, and plans a step that waits for that one.
+    until(&events, |flow| flow.id == workflow && status(flow, 2) == NodeStatus::Running);
+    client.request(Command::SendToAgent { agent: commander, text: "Then do more".into() }).unwrap();
+    let follow = until(&events, |flow| flow.title == "Follow-up");
+    let briefed = std::fs::read_to_string(scratch.path().join("briefed")).unwrap();
+    assert!(briefed.contains("<maestro-status>"), "{briefed}");
+    assert!(briefed.contains(r#"wf1/n2 \"Second\": running"#), "{briefed}");
+    assert!(briefed.contains("Then do more"), "{briefed}");
+    // The step that needs nothing starts at once; the other waits.
+    let aside =
+        until(&events, |flow| flow.id == follow.id && status(flow, 2) == NodeStatus::Succeeded);
+    assert_eq!(status(&aside, 1), NodeStatus::Pending);
+
+    std::fs::write(scratch.path().join("gate"), "").unwrap();
+    let third =
+        until(&events, |flow| flow.id == follow.id && status(flow, 1) == NodeStatus::Succeeded);
+    assert!(third.node(NodeId(1)).unwrap().after.len() == 1);
+    // It started once the second step was done, with that work merged into its worktree.
+    let seen = std::fs::read_to_string(trees.path().join("maestro-wf2-n1/maestro-wf2-n1.seen"));
+    let seen = seen.unwrap();
+    assert!(seen.contains("maestro-wf1-n2.txt") && seen.contains("maestro-wf1-n1.txt"), "{seen}");
+
+    let done = client.request(Command::GetWorkflow { workflow }).unwrap();
+    let Reply::Workflow { workflow: done } = done else { panic!("{done:?}") };
     assert_eq!(status(&done, 1), NodeStatus::Succeeded);
+    assert_eq!(status(&done, 2), NodeStatus::Succeeded);
 
     // The router chose by difficulty: low effort for the easy step, high for the hard one.
     let effort = |node| done.node(NodeId(node)).unwrap().model.as_ref().unwrap().effort;
