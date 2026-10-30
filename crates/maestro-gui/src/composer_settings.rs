@@ -1,14 +1,10 @@
 //! The composer's model and reasoning controls, grouped in one anchored popover.
 
-use std::cell::Cell;
-use std::rc::Rc;
-
-use atelier::{
-    ActiveTheme, Button, ControlSize, Icon, IconName, Label, ListItem, Popover, TextColor, TextSize,
-};
+use atelier::agent::EffortPicker;
+use atelier::{ActiveTheme, Button, ControlSize, IconName, IconSource, Label, MenuItem, Popover};
 use gpui::{
-    App, Bounds, ClickEvent, Context, Corner, Focusable, IntoElement, MouseButton, ParentElement,
-    Pixels, RenderOnce, Styled, Window, canvas, div, prelude::*, relative,
+    App, ClickEvent, Context, Corner, Focusable, IntoElement, ParentElement, RenderOnce, Styled,
+    Window, div, prelude::*,
 };
 use gpui_component::{Selectable, popover::Popover as AnchoredPopover};
 use maestro_core::{Effort, ModelChoice, ModelGrade, ProviderKind};
@@ -16,7 +12,6 @@ use maestro_core::{Effort, ModelChoice, ModelGrade, ProviderKind};
 use crate::app::Maestro;
 use crate::chat::provider_logo;
 use crate::i18n::tr;
-use crate::trf;
 
 const EFFORTS: [Effort; 4] = [Effort::Low, Effort::Medium, Effort::High, Effort::Max];
 
@@ -153,123 +148,23 @@ impl Maestro {
         let theme = cx.theme().clone();
         let choice = self.commander_choice();
         let selected = EFFORTS.iter().position(|effort| *effort == choice.effort).unwrap_or(1);
-        let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
-        let measured = bounds.clone();
-        let clicked = bounds.clone();
-        let steps = EFFORTS.into_iter().enumerate().map(|(index, effort)| {
-            div().flex().flex_1().justify_center().child(
-                Button::icon_only(
-                    ("commander-effort", index),
-                    if index == selected { IconName::Check } else { IconName::Record },
-                )
-                .ghost()
-                .selected(index == selected)
-                .tint(theme.colors.text)
-                .radius(theme.density.control_md / 2.)
-                .tooltip(trf!("Reasoning effort: {}", "思考量: {}", effort_label(effort)))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_commander_effort(effort, cx))),
-            )
-        });
-        Popover::new()
-            .w(theme.typography.size_md * 25.)
-            .p(theme.spacing.lg)
-            .gap(theme.spacing.md)
-            .rounded(theme.shape.radius_lg)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.spacing.sm)
-                    .child(Icon::new(IconName::Sparkles).color(theme.colors.accent_text))
-                    .child(
-                        div().flex().flex_1().justify_center().child(
-                            Label::new(effort_label(choice.effort))
-                                .size(TextSize::XLarge)
-                                .color(TextColor::Accent),
-                        ),
-                    )
-                    .child(
-                        Button::icon_only("reset-commander-effort", IconName::Refresh)
-                            .ghost()
-                            .size(ControlSize::Small)
-                            .disabled(choice.effort == Effort::Medium)
-                            .tooltip(tr("Reset reasoning effort", "思考量を標準に戻す"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_commander_effort(Effort::Medium, cx)
-                            })),
-                    ),
-            )
-            .child(
-                div().flex().justify_center().child(
-                    Button::new("choose-commander-model", model_label(&choice).to_owned())
-                        .ghost()
-                        .size(ControlSize::Small)
-                        .icon_after(IconName::ChevronRight)
-                        .when_some(provider_logo(choice.provider), |button, logo| button.icon(logo))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.commander_models_open = true;
-                            this.commander_settings_focus.focus(window);
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .p(theme.spacing.xxs)
-                    .rounded(theme.density.control_md)
-                    .bg(theme.colors.elevated)
-                    .border_1()
-                    .border_color(theme.colors.border)
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .h_full()
-                            .w(relative((selected as f32 + 0.5) / EFFORTS.len() as f32))
-                            .rounded(theme.density.control_md)
-                            .bg(theme.colors.accent),
-                    )
-                    .children(steps)
-                    .child(
-                        canvas(move |bounds, _, _| measured.set(Some(bounds)), |_, _, _, _| {})
-                            .absolute()
-                            .size_full(),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            if let Some(bounds) = clicked.get() {
-                                this.set_commander_effort(effort_at(event.position.x, bounds), cx);
-                            }
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(MouseButton::Left)
-                            && let Some(bounds) = bounds.get()
-                        {
-                            this.set_commander_effort(effort_at(event.position.x, bounds), cx);
-                        }
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                        let next = match event.keystroke.key.as_str() {
-                            "left" => selected.saturating_sub(1),
-                            "right" => (selected + 1).min(EFFORTS.len() - 1),
-                            "home" => 0,
-                            "end" => EFFORTS.len() - 1,
-                            _ => return,
-                        };
-                        this.set_commander_effort(EFFORTS[next], cx);
-                        cx.stop_propagation();
-                    })),
-            )
-            .child(div().flex().children(EFFORTS.map(|effort| {
-                div().flex().flex_1().justify_center().child(
-                    Label::new(effort_label(effort)).size(TextSize::XSmall).color(TextColor::Muted),
-                )
-            })))
+        EffortPicker::new("commander-effort-picker", EFFORTS.map(effort_label), selected)
+            .width(theme.density.form_width / 2.)
+            .default_level(1)
+            .show_fast(false)
+            .model(model_label(&choice).to_owned())
+            .when_some(provider_logo(choice.provider), |picker, logo| picker.model_icon(logo))
+            .on_select(cx.listener(|this, index: &usize, _, cx| {
+                this.set_commander_effort(EFFORTS[*index], cx);
+            }))
+            .on_model(cx.listener(|this, _, window, cx| {
+                this.commander_models_open = true;
+                this.commander_settings_focus.focus(window);
+                cx.notify();
+            }))
+            .on_reset(cx.listener(|this, _, _, cx| {
+                this.set_commander_effort(Effort::Medium, cx);
+            }))
             .into_any_element()
     }
 
@@ -309,14 +204,18 @@ impl Maestro {
                     model.clone()
                 };
                 rows.push(
-                    ListItem::new(
+                    MenuItem::new(
                         gpui::ElementId::Name(
                             format!("commander-model-{provider:?}-{index}").into(),
                         ),
                         label,
                     )
-                    .selected(selected)
-                    .when_some(provider_logo(provider), |item, logo| item.icon(logo))
+                    .checked(selected)
+                    .icon(
+                        provider_logo(provider)
+                            .map(IconSource::from)
+                            .unwrap_or_else(|| IconName::Code.into()),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.allowed_providers().contains(&provider) {
                             this.commander_model = ModelChoice {
@@ -335,9 +234,7 @@ impl Maestro {
             }
         }
         Popover::new()
-            .w(theme.typography.size_md * 25.)
-            .p(theme.spacing.sm)
-            .rounded(theme.shape.radius_lg)
+            .w(theme.density.form_width / 2.)
             .child(
                 Button::new("back-to-commander-effort", tr("Model", "モデル"))
                     .ghost()
@@ -361,26 +258,9 @@ impl Maestro {
     }
 }
 
-fn effort_at(x: Pixels, bounds: Bounds<Pixels>) -> Effort {
-    let position = ((x - bounds.left()) / bounds.size.width.max(gpui::px(1.))).clamp(0., 1.);
-    EFFORTS[((position * EFFORTS.len() as f32) as usize).min(EFFORTS.len() - 1)]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dragging_past_the_track_clamps_to_the_end_levels() {
-        let bounds = Bounds::new(
-            gpui::point(gpui::px(100.), gpui::px(0.)),
-            gpui::size(gpui::px(400.), gpui::px(32.)),
-        );
-        assert_eq!(
-            (effort_at(gpui::px(0.), bounds), effort_at(gpui::px(600.), bounds)),
-            (Effort::Low, Effort::Max)
-        );
-    }
 
     #[test]
     fn allowed_model_keeps_its_name_grade_and_effort() {

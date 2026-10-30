@@ -480,7 +480,7 @@ dependencies = [
 [[package]]
 name = "atelier"
 version = "0.2.0"
-source = "git+https://github.com/uthree/design-language?rev=45b7d79c34b335211c5507a873fcd7bea9db0033#45b7d79c34b335211c5507a873fcd7bea9db0033"
+source = "git+https://github.com/uthree/design-language?rev=a0a2b985d78882de483634284f017106b00b1b03#a0a2b985d78882de483634284f017106b00b1b03"
 dependencies = [
  "gpui",
  "image",
@@ -573,7 +573,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",

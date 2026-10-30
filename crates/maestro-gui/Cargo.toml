@@ -21,10 +21,10 @@ maestro-protocol.workspace = true
 # `runtime_shaders` compiles the Metal shaders at start-up, so the app builds on a Mac with only
 # the Command Line Tools installed.
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
-# Atelier, the design language, pinned to a reviewed revision of its main branch.
-atelier = { git = "https://github.com/uthree/design-language", rev = "45b7d79c34b335211c5507a873fcd7bea9db0033" }
-# Only for its text input (caret, selection, IME); Atelier ships no editor. Later releases need
-# gpui snapshots, and 0.5.1 is the last on gpui 0.2.2.
+# Atelier, including the optional fast-mode control for reasoning-only pickers.
+atelier = { git = "https://github.com/uthree/design-language", rev = "a0a2b985d78882de483634284f017106b00b1b03" }
+# Text editing (caret, selection, IME) and popup lifecycle; Atelier supplies their visual
+# surfaces. Later releases need gpui snapshots; 0.5.1 is the last on gpui 0.2.2.
 gpui-component = "=0.5.1"
 # The daemon's events reach the window as a stream its tasks await.
 futures = "0.3"
