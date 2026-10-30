@@ -19,7 +19,8 @@ use maestro_protocol::AgentStatus;
 
 use crate::app::{Maestro, Progress};
 use crate::graph::model_label;
-use crate::input;
+use crate::i18n::tr;
+use crate::{input, trf};
 
 /// The widest the transcript and the composer grow, so lines stay easy to read on a wide screen.
 const READING_WIDTH: f32 = 780.;
@@ -42,7 +43,7 @@ pub fn conversation_title(view: &AgentView) -> String {
         Entry::User(text) => Some(text.as_str()),
         _ => None,
     });
-    let Some(first) = first else { return "New conversation".into() };
+    let Some(first) = first else { return tr("New conversation", "新しい会話").into() };
     let line = first.lines().next().unwrap_or_default();
     match line.char_indices().nth(48) {
         Some((end, _)) => format!("{}…", &line[..end]),
@@ -69,7 +70,7 @@ fn without_plans(text: &str) -> String {
             rest = "";
             break;
         };
-        shown.push_str("(The plan is below.)");
+        shown.push_str(tr("(The plan is below.)", "（計画は下にあります）"));
         rest = &body[end + 3..];
     }
     shown.push_str(rest);
@@ -79,9 +80,18 @@ fn without_plans(text: &str) -> String {
 /// What allowing a request of this kind lets the agent do.
 fn approval_body(kind: PermissionKind) -> &'static str {
     match kind {
-        PermissionKind::Command => "The agent wants to run this command in its worktree.",
-        PermissionKind::FileChange => "The agent wants to change files in its worktree.",
-        PermissionKind::Other => "The agent wants to do something its permissions do not cover.",
+        PermissionKind::Command => tr(
+            "The agent wants to run this command in its worktree.",
+            "エージェントが自分のワークツリーでこのコマンドを実行しようとしています。",
+        ),
+        PermissionKind::FileChange => tr(
+            "The agent wants to change files in its worktree.",
+            "エージェントが自分のワークツリーのファイルを変更しようとしています。",
+        ),
+        PermissionKind::Other => tr(
+            "The agent wants to do something its permissions do not cover.",
+            "エージェントが権限の範囲外の操作をしようとしています。",
+        ),
     }
 }
 
@@ -149,16 +159,18 @@ impl Maestro {
                         .action(CopyButton::new(element("copy", &key), text))
                         .into_any_element()
                 }
-                Entry::Reasoning(text) => {
-                    ReasoningBlock::new(element("reasoning", &key), "Reasoning", text.clone())
-                        .open(open)
-                        .on_toggle(toggle)
-                        .into_any_element()
-                }
+                Entry::Reasoning(text) => ReasoningBlock::new(
+                    element("reasoning", &key),
+                    tr("Reasoning", "推論"),
+                    text.clone(),
+                )
+                .open(open)
+                .on_toggle(toggle)
+                .into_any_element(),
                 Entry::Tools(tools) => {
                     let title = match tools.len() {
-                        1 => "Used 1 tool".to_string(),
-                        count => format!("Used {count} tools"),
+                        1 => tr("Used 1 tool", "ツールを 1 回使用").to_string(),
+                        count => trf!("Used {count} tools", "ツールを {count} 回使用"),
                     };
                     let mut group = ToolGroup::new(title);
                     for (call, tool) in tools.iter().enumerate() {
@@ -201,10 +213,10 @@ impl Maestro {
                     let (allow, deny) = (request.id.clone(), request.id.clone());
                     ApprovalCard::new(
                         element("approval", &key),
-                        format!("Allow: {}?", request.summary),
+                        trf!("Allow: {}?", "許可しますか: {}", request.summary),
                     )
                     .body(approval_body(request.kind))
-                    .allow_label("Allow")
+                    .allow_label(tr("Allow", "許可"))
                     .on_allow(cx.listener(move |this, _, _, cx| {
                         this.answer(agent, allow.clone(), true, cx);
                     }))
@@ -214,16 +226,20 @@ impl Maestro {
                     .into_any_element()
                 }
                 Entry::Permission { request, allowed, .. } => ChatNotice::status(match allowed {
-                    Some(true) => format!("Allowed: {}", request.summary),
-                    _ => format!("Refused: {}", request.summary),
+                    Some(true) => trf!("Allowed: {}", "許可済み: {}", request.summary),
+                    _ => trf!("Refused: {}", "拒否: {}", request.summary),
                 })
                 .into_any_element(),
-                Entry::Failed(message) => {
-                    ChatNotice::error(format!("The turn failed: {message}")).into_any_element()
-                }
+                Entry::Failed(message) => ChatNotice::error(trf!(
+                    "The turn failed: {message}",
+                    "ターンが失敗しました: {message}"
+                ))
+                .into_any_element(),
                 Entry::Exited(reason) => ChatNotice::status(match reason {
-                    Some(reason) => format!("The agent stopped: {reason}"),
-                    None => "The agent stopped".into(),
+                    Some(reason) => {
+                        trf!("The agent stopped: {reason}", "エージェントが停止しました: {reason}")
+                    }
+                    None => tr("The agent stopped", "エージェントが停止しました").into(),
                 })
                 .into_any_element(),
             };
@@ -231,7 +247,7 @@ impl Maestro {
         }
         if view.transcript.busy && matches!(view.transcript.entries.last(), Some(Entry::User(_))) {
             rows.push(
-                ThinkingIndicator::new("Thinking")
+                ThinkingIndicator::new(tr("Thinking", "考え中"))
                     .when_some(logo, ThinkingIndicator::logo)
                     .into_any_element(),
             );
@@ -249,16 +265,19 @@ impl Maestro {
         for node in flow.topological_order().into_iter().filter_map(|id| flow.node(id)) {
             let state = step_state(node.status);
             steps = match node.status {
-                NodeStatus::AwaitingUser => {
-                    steps.step_with_detail(node.title.clone(), "Waiting for you", state)
-                }
+                NodeStatus::AwaitingUser => steps.step_with_detail(
+                    node.title.clone(),
+                    tr("Waiting for you", "あなた待ち"),
+                    state,
+                ),
                 NodeStatus::Running => {
                     steps.step_with_detail(node.title.clone(), model_label(node), state)
                 }
                 _ => steps.step(node.title.clone(), state),
             };
         }
-        let summary = format!("{} of {} steps done", progress.done, progress.total);
+        let summary =
+            trf!("{} of {} steps done", "{} / {} ステップ完了", progress.done, progress.total);
         Card::new()
             .w_full()
             .p(theme.spacing.lg)
@@ -277,14 +296,18 @@ impl Maestro {
                     )
                     .when(progress.waiting > 0, |row| {
                         row.child(
-                            Badge::new(format!("{} waiting for you", progress.waiting))
-                                .tone(Tone::Warning)
-                                .icon(IconName::Alert),
+                            Badge::new(trf!(
+                                "{} waiting for you",
+                                "{} 件があなた待ち",
+                                progress.waiting
+                            ))
+                            .tone(Tone::Warning)
+                            .icon(IconName::Alert),
                         )
                     })
                     .when(progress.failed > 0, |row| {
                         row.child(
-                            Badge::new(format!("{} failed", progress.failed))
+                            Badge::new(trf!("{} failed", "{} 件失敗", progress.failed))
                                 .tone(Tone::Danger)
                                 .icon(IconName::Alert),
                         )
@@ -297,21 +320,24 @@ impl Maestro {
                     .flex_wrap()
                     .gap(theme.spacing.sm)
                     .child(
-                        Button::new(("open-plan", workflow.0 as usize), "Open workflow")
-                            .variant(ButtonVariant::Agent)
-                            .icon(IconName::Sparkles)
-                            .size(ControlSize::Small)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_workflow(workflow);
-                                cx.notify();
-                            })),
+                        Button::new(
+                            ("open-plan", workflow.0 as usize),
+                            tr("Open workflow", "ワークフローを開く"),
+                        )
+                        .variant(ButtonVariant::Agent)
+                        .icon(IconName::Sparkles)
+                        .size(ControlSize::Small)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_workflow(workflow);
+                            cx.notify();
+                        })),
                     )
                     .map(|row| {
                         if progress.finished {
                             row.child(
                                 Button::new(
                                     ("publish-plan", workflow.0 as usize),
-                                    "Open pull request",
+                                    tr("Open pull request", "プルリクエストを作成"),
                                 )
                                 .primary()
                                 .icon(IconName::ArrowUp)
@@ -322,7 +348,7 @@ impl Maestro {
                             )
                         } else {
                             row.child(
-                                Button::new(("run-plan", workflow.0 as usize), "Run")
+                                Button::new(("run-plan", workflow.0 as usize), tr("Run", "実行"))
                                     .primary()
                                     .icon(IconName::Play)
                                     .size(ControlSize::Small)
@@ -344,19 +370,28 @@ impl Maestro {
             .flex_col()
             .gap(theme.spacing.xl)
             .pt(theme.spacing.xxl)
-            .child(SectionHeader::new("What should be built?").description(
-                "The commander reads the repository, talks the plan through with you, and \
-                 writes it as a workflow of steps; each step gets its own worker and its own git \
-                 worktree. It never changes files itself.",
+            .child(SectionHeader::new(tr("What should be built?", "何を作りますか？")).description(
+                tr(
+                    "The commander reads the repository, talks the plan through with you, and \
+                     writes it as a workflow of steps; each step gets its own worker and its own \
+                     git worktree. It never changes files itself.",
+                    "コマンダーはリポジトリを読み、あなたと計画を話し合って、ステップからなる\
+                     ワークフローとして書き出します。各ステップには専用のワーカーと git \
+                     ワークツリーが割り当てられます。コマンダー自身がファイルを変更することは\
+                     ありません。",
+                ),
             ))
             .when(self.project.repository.is_none(), |empty| empty.child(self.project_fields(cx)))
             .child(
                 div().flex().child(
-                    Button::new("greeting-empty", "Start from an empty workflow")
-                        .ghost()
-                        .icon(IconName::Plus)
-                        .size(ControlSize::Small)
-                        .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
+                    Button::new(
+                        "greeting-empty",
+                        tr("Start from an empty workflow", "空のワークフローから始める"),
+                    )
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .size(ControlSize::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
                 ),
             )
     }

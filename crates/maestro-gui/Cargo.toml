@@ -30,6 +30,8 @@ gpui-component = "=0.5.1"
 futures = "0.3"
 # `RUST_LOG=info maestro` shows what gpui says about the window and the GPU.
 env_logger = "0.11"
+# The system language, which picks between the English and Japanese strings.
+sys-locale = "0.3.2"
 
 [lints]
 workspace = true

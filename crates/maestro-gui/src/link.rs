@@ -11,6 +11,9 @@ use futures::channel::mpsc::{self, UnboundedReceiver};
 use maestro_client::{Client, ClientError, Launch, Mirror};
 use maestro_protocol::{Event, PROTOCOL_VERSION};
 
+use crate::i18n::tr;
+use crate::trf;
+
 /// A connected daemon, with everything it had when the window connected.
 pub struct Opened {
     /// The connection; requests may be made from any thread.
@@ -45,8 +48,8 @@ pub fn open(launch: &Launch) -> Result<Opened, ClientError> {
 /// Where the daemon is, in words for the window's chrome.
 pub fn describe(launch: &Launch) -> String {
     match launch {
-        Launch::InProcess(_) => "this window".into(),
-        Launch::Local { .. } => "this machine".into(),
+        Launch::InProcess(_) => tr("this window", "このウィンドウ").into(),
+        Launch::Local { .. } => tr("this machine", "このマシン").into(),
         Launch::Ssh { destination, .. } => destination.clone(),
     }
 }
@@ -55,13 +58,19 @@ pub fn describe(launch: &Launch) -> String {
 pub fn explain(error: &ClientError, launch: &Launch) -> String {
     let place = describe(launch);
     match error {
-        ClientError::Version { daemon } => format!(
+        ClientError::Version { daemon } => trf!(
             "The maestro-daemon on {place} speaks protocol {daemon}, and this app speaks \
              {PROTOCOL_VERSION}. Install the maestro-daemon built with this app there \
-             (cargo build --workspace), then try again."
+             (cargo build --workspace), then try again.",
+            "{place}の maestro-daemon はプロトコル {daemon} で、このアプリは {PROTOCOL_VERSION} \
+             です。このアプリと同じビルドの maestro-daemon をそこにインストールしてから \
+             (cargo build --workspace)、再試行してください。"
         ),
         error => {
-            format!("{error}. Check that maestro-daemon is installed on {place} and try again.")
+            trf!(
+                "{error}. Check that maestro-daemon is installed on {place} and try again.",
+                "{error}。{place}に maestro-daemon がインストールされているか確認して、再試行してください。"
+            )
         }
     }
 }

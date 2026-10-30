@@ -16,7 +16,8 @@ use maestro_core::{
 use crate::app::{Maestro, Progress};
 use crate::chat::{agent_status, conversation_title, provider_logo};
 use crate::graph::{model_label, status_label, status_tone};
-use crate::{input, link};
+use crate::i18n::{self, tr};
+use crate::{input, link, trf};
 
 /// The inspector's width beside the canvas.
 pub const INSPECTOR_WIDTH: f32 = 360.;
@@ -47,9 +48,9 @@ impl Maestro {
                 let status = agent_status(view.status, !view.transcript.entries.is_empty());
                 let plans = self.mirror.plans.get(&id).map_or(0, Vec::len);
                 let time = match plans {
-                    0 => status.label().to_string(),
-                    1 => "1 plan".into(),
-                    plans => format!("{plans} plans"),
+                    0 => i18n::agent_status(status).to_string(),
+                    1 => tr("1 plan", "計画 1 件").into(),
+                    plans => trf!("{plans} plans", "計画 {plans} 件"),
                 };
                 ConversationRow::new(
                     ("conversation", id.0 as usize),
@@ -82,8 +83,8 @@ impl Maestro {
                     .icon(if attention { IconName::Alert } else { IconName::Sliders })
                     .when(attention, |item| item.icon_color(theme.colors.warning))
                     .description(match total {
-                        0 => "No steps".to_string(),
-                        _ => format!("{done} of {total} steps done"),
+                        0 => tr("No steps", "ステップなし").to_string(),
+                        _ => trf!("{done} of {total} steps done", "{total} ステップ中 {done} 完了"),
                     })
                     .selected(self.workflow_open && self.workflow == Some(id))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -100,7 +101,7 @@ impl Maestro {
             .p(theme.spacing.sm)
             .gap(theme.spacing.xxs)
             .child(
-                Button::new("new-conversation", "New conversation")
+                Button::new("new-conversation", tr("New conversation", "新しい会話"))
                     .icon(IconName::Plus)
                     .full_width()
                     .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
@@ -114,12 +115,12 @@ impl Maestro {
                     .min_h_0()
                     .overflow_y_scroll()
                     .gap(theme.spacing.xxs)
-                    .child(self.caption("Conversations", cx))
+                    .child(self.caption(tr("Conversations", "会話"), cx))
                     .children(conversations)
                     .when(no_conversations, |list| {
                         list.child(
                             div().px(theme.spacing.sm).child(
-                                Label::new("Nothing yet")
+                                Label::new(tr("Nothing yet", "まだありません"))
                                     .size(TextSize::XSmall)
                                     .color(TextColor::Faint),
                             ),
@@ -129,11 +130,15 @@ impl Maestro {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().flex_1().child(self.caption("Workflows", cx)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(self.caption(tr("Workflows", "ワークフロー"), cx)),
+                            )
                             .child(
                                 Button::icon_only("new-workflow", IconName::Plus)
                                     .size(ControlSize::Small)
-                                    .tooltip("New empty workflow")
+                                    .tooltip(tr("New empty workflow", "空のワークフローを作成"))
                                     .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
                             ),
                     )
@@ -141,9 +146,12 @@ impl Maestro {
                     .when(no_workflows, |list| {
                         list.child(
                             div().px(theme.spacing.sm).child(
-                                Label::new("Plans the commander writes appear here")
-                                    .size(TextSize::XSmall)
-                                    .color(TextColor::Faint),
+                                Label::new(tr(
+                                    "Plans the commander writes appear here",
+                                    "コマンダーが書いた計画がここに表示されます",
+                                ))
+                                .size(TextSize::XSmall)
+                                .color(TextColor::Faint),
                             ),
                         )
                     }),
@@ -156,11 +164,15 @@ impl Maestro {
                     .p(theme.spacing.sm)
                     .border_t_1()
                     .border_color(theme.colors.separator)
-                    .child(Label::new("Repository").size(TextSize::XSmall).color(TextColor::Faint))
+                    .child(
+                        Label::new(tr("Repository", "リポジトリ"))
+                            .size(TextSize::XSmall)
+                            .color(TextColor::Faint),
+                    )
                     .child(
                         Label::new(match &self.project.repository {
                             Some(path) => path.display().to_string(),
-                            None => "Not chosen".into(),
+                            None => tr("Not chosen", "未選択").into(),
                         })
                         .size(TextSize::Small)
                         .mono()
@@ -185,8 +197,11 @@ impl Maestro {
             .flex()
             .flex_col()
             .gap(theme.spacing.md)
-            .child(field(format!("Repository on {place}"), &self.fields.repository))
-            .child(field("Base branch".into(), &self.fields.base))
+            .child(field(
+                trf!("Repository on {place}", "{place}上のリポジトリ"),
+                &self.fields.repository,
+            ))
+            .child(field(tr("Base branch", "ベースブランチ").into(), &self.fields.base))
     }
 
     pub(crate) fn connecting(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -201,7 +216,7 @@ impl Maestro {
             .bg(theme.colors.background)
             .child(Spinner::new("connecting").size(px(20.)).color(theme.colors.accent))
             .child(
-                Label::new(format!("Connecting to {}…", link::describe(&self.launch)))
+                Label::new(trf!("Connecting to {}…", "{}に接続中…", link::describe(&self.launch)))
                     .color(TextColor::Muted),
             )
     }
@@ -209,13 +224,19 @@ impl Maestro {
     pub(crate) fn lost(&self, reason: String, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         div().flex().flex_1().items_center().justify_center().bg(theme.colors.background).child(
-            EmptyState::new(IconName::Alert, "Can't reach the daemon").description(reason).action(
-                Button::new("reconnect", "Try again").primary().icon(IconName::Refresh).on_click(
-                    cx.listener(|this, _, _, cx| {
+            EmptyState::new(
+                IconName::Alert,
+                tr("Can't reach the daemon", "デーモンに接続できません"),
+            )
+            .description(reason)
+            .action(
+                Button::new("reconnect", tr("Try again", "再試行"))
+                    .primary()
+                    .icon(IconName::Refresh)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.connect(cx);
                         cx.notify();
-                    }),
-                ),
+                    })),
             ),
         )
     }
@@ -259,34 +280,39 @@ impl Maestro {
                             .truncate(),
                     )
                     .child(
-                        Label::new(format!("{} of {} steps done", progress.done, progress.total))
-                            .size(TextSize::XSmall)
-                            .color(TextColor::Muted)
-                            .truncate(),
+                        Label::new(trf!(
+                            "{} of {} steps done",
+                            "{} / {} ステップ完了",
+                            progress.done,
+                            progress.total
+                        ))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Muted)
+                        .truncate(),
                     ),
             )
             .when(progress.waiting > 0, |bar| {
                 bar.child(
-                    Badge::new(format!("{} waiting for you", progress.waiting))
+                    Badge::new(trf!("{} waiting for you", "{} 件があなた待ち", progress.waiting))
                         .tone(Tone::Warning)
                         .icon(IconName::Alert),
                 )
             })
             .when(progress.failed > 0, |bar| {
                 bar.child(
-                    Badge::new(format!("{} failed", progress.failed))
+                    Badge::new(trf!("{} failed", "{} 件失敗", progress.failed))
                         .tone(Tone::Danger)
                         .icon(IconName::Alert),
                 )
             })
             .child(if progress.finished {
-                Button::new("publish", "Open pull request")
+                Button::new("publish", tr("Open pull request", "プルリクエストを作成"))
                     .primary()
                     .icon(IconName::ArrowUp)
                     .size(ControlSize::Small)
                     .on_click(cx.listener(move |this, _, _, cx| this.publish(workflow, cx)))
             } else {
-                Button::new("run", "Run")
+                Button::new("run", tr("Run", "実行"))
                     .primary()
                     .icon(IconName::Play)
                     .size(ControlSize::Small)
@@ -304,9 +330,9 @@ impl Maestro {
                         },
                     )
                     .tooltip(if self.workflow_full {
-                        "Show the conversation beside it"
+                        tr("Show the conversation beside it", "会話を横に表示")
                     } else {
-                        "Fill the window"
+                        tr("Fill the window", "ウィンドウ全体に広げる")
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workflow_full = !this.workflow_full;
@@ -316,7 +342,7 @@ impl Maestro {
             })
             .child(
                 Button::icon_only("close-workflow", IconName::Close)
-                    .tooltip("Back to the conversation")
+                    .tooltip(tr("Back to the conversation", "会話に戻る"))
                     .on_click(cx.listener(|this, _, _, cx| this.close_workflow(cx))),
             );
         div()
@@ -372,12 +398,17 @@ impl Maestro {
                 .px(theme.spacing.sm)
                 .border_b_1()
                 .border_color(theme.colors.border)
-                .child(Tabs::new("node-tabs", ["Details", "Worker"], self.node_tab).on_select(
-                    cx.listener(|this, index: &usize, _, cx| {
+                .child(
+                    Tabs::new(
+                        "node-tabs",
+                        [tr("Details", "詳細"), tr("Worker", "ワーカー")],
+                        self.node_tab,
+                    )
+                    .on_select(cx.listener(|this, index: &usize, _, cx| {
                         this.node_tab = *index;
                         cx.notify();
-                    }),
-                ))
+                    })),
+                )
         });
         if beside {
             Sidebar::new(Edge::Right).w(width).children(tabs).child(content).into_any_element()
@@ -426,8 +457,8 @@ impl Maestro {
             .unwrap_or_default();
         let rating = self.workflow.and_then(|workflow| self.ratings.get(&(workflow, id)).copied());
         let origin = match node.origin {
-            NodeOrigin::Commander => "Planned by the commander",
-            NodeOrigin::User => "Written by you",
+            NodeOrigin::Commander => tr("Planned by the commander", "コマンダーが計画"),
+            NodeOrigin::User => tr("Written by you", "あなたが作成"),
         };
 
         div()
@@ -459,10 +490,10 @@ impl Maestro {
                     .flex()
                     .flex_col()
                     .gap(theme.spacing.md)
-                    .child(group().child(label("Title")).child(TextField::new().child(input::editor(&self.fields.title))))
+                    .child(group().child(label(tr("Title", "タイトル"))).child(TextField::new().child(input::editor(&self.fields.title))))
                     .child(
                         group()
-                            .child(label("Instructions"))
+                            .child(label(tr("Instructions", "指示")))
                             .child(
                                 // A capsule suits one line; instructions run to paragraphs.
                                 div()
@@ -478,7 +509,7 @@ impl Maestro {
                     )
                     .child(
                         div().flex().child(
-                            Button::new("save-node", "Save changes")
+                            Button::new("save-node", tr("Save changes", "変更を保存"))
                                 .primary()
                                 .size(ControlSize::Small)
                                 .disabled(!dirty)
@@ -488,11 +519,11 @@ impl Maestro {
             )
             .child(
                 group()
-                    .child(label("Difficulty"))
+                    .child(label(tr("Difficulty", "難易度")))
                     .child(
                         SegmentedControl::new(
                             "difficulty",
-                            Difficulty::ALL.map(|difficulty| Segment::label(difficulty.label())),
+                            Difficulty::ALL.map(|difficulty| Segment::label(i18n::difficulty(difficulty))),
                             Difficulty::ALL.iter().position(|d| *d == difficulty).unwrap_or(2),
                         )
                         .size(ControlSize::Small)
@@ -502,19 +533,22 @@ impl Maestro {
                         })),
                     )
                     .child(
-                        Label::new("Decides the model's grade and effort when the router picks it")
+                        Label::new(tr(
+                            "Decides the model's grade and effort when the router picks it",
+                            "ルーターが選ぶときのモデルのグレードとエフォートを決めます",
+                        ))
                             .size(TextSize::XSmall)
                             .color(TextColor::Faint),
                     ),
             )
             .child(
                 group()
-                    .child(label("Runs on"))
+                    .child(label(tr("Runs on", "実行先")))
                     .child(
                         // Five names do not fit a segmented control at the inspector's width.
                         div().flex().flex_wrap().gap(theme.spacing.xs).children(RUNS_ON.iter().enumerate().map(
                             |(index, name)| {
-                                Button::new(("runs-on", index), *name)
+                                Button::new(("runs-on", index), if index == 0 { tr("Auto", "自動") } else { name })
                                     .size(ControlSize::Small)
                                     .selected(index == runs_on)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -533,10 +567,10 @@ impl Maestro {
             )
             .child(
                 group()
-                    .child(label("Waits for"))
+                    .child(label(tr("Waits for", "待機先")))
                     .when(dependencies.is_empty(), |list| {
                         list.child(
-                            Label::new("Nothing; it can start first")
+                            Label::new(tr("Nothing; it can start first", "なし。最初に開始できます"))
                                 .size(TextSize::Small)
                                 .color(TextColor::Faint),
                         )
@@ -547,7 +581,7 @@ impl Maestro {
                             .trailing(
                                 Button::icon_only(("drop-dependency", dep.0 as usize), IconName::Close)
                                     .size(ControlSize::Small)
-                                    .tooltip("Stop waiting for this step")
+                                    .tooltip(tr("Stop waiting for this step", "このステップを待たない"))
                                     .on_click(cx.listener(move |this, _, _, cx| this.disconnect_nodes(dep, id, cx))),
                             )
                     })),
@@ -555,7 +589,7 @@ impl Maestro {
             .when(node.status == NodeStatus::Succeeded, |details| {
                 details.child(
                     group()
-                        .child(label("How did it go?"))
+                        .child(label(tr("How did it go?", "結果はどうでしたか？")))
                         .child(div().flex().gap(theme.spacing.xs).children((1..=5u8).map(|stars| {
                             Button::new(("rate", stars as usize), stars.to_string())
                                 .size(ControlSize::Small)
@@ -563,7 +597,10 @@ impl Maestro {
                                 .on_click(cx.listener(move |this, _, _, cx| this.rate(id, stars, cx)))
                         })))
                         .child(
-                            Label::new("1 is poor, 5 excellent. Ratings teach the router which models to pick")
+                            Label::new(tr(
+                                "1 is poor, 5 excellent. Ratings teach the router which models to pick",
+                                "1 が最低、5 が最高。評価はルーターのモデル選びに使われます",
+                            ))
                                 .size(TextSize::XSmall)
                                 .color(TextColor::Faint),
                         ),
@@ -571,7 +608,7 @@ impl Maestro {
             })
             .child(
                 div().flex().child(
-                    Button::new("delete-node", "Delete step")
+                    Button::new("delete-node", tr("Delete step", "ステップを削除"))
                         .variant(ButtonVariant::Danger)
                         .icon(IconName::Trash)
                         .size(ControlSize::Small)
@@ -619,7 +656,7 @@ impl Maestro {
                                 this.update(cx, |this, cx| this.send_to_node(window, cx)).ok();
                             })
                         })
-                        .model(format!("{} · worker", provider.label()))
+                        .model(trf!("{} · worker", "{} · ワーカー", provider.label()))
                         .when_some(provider_logo(provider), Composer::model_logo)
                         .busy(busy)
                         .on_send(cx.listener(|this, _, window, cx| this.send_to_node(window, cx)))
@@ -635,10 +672,9 @@ impl Maestro {
         let total = flow.nodes().count();
         let done = flow.nodes().filter(|node| node.status == NodeStatus::Succeeded).count();
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
-        let target = flow
-            .target
-            .as_ref()
-            .map(|target| format!("{} from {}", target.repository.display(), target.base));
+        let target = flow.target.as_ref().map(|target| {
+            trf!("{} from {}", "{}（{} から）", target.repository.display(), target.base)
+        });
         let steps: Vec<_> = flow
             .topological_order()
             .into_iter()
@@ -666,36 +702,44 @@ impl Maestro {
             .overflow_y_scroll()
             .gap(theme.spacing.xl)
             .p(theme.spacing.lg)
-            .child(
-                SectionHeader::new(flow.title.clone())
-                    .description(format!("{done} of {total} steps done")),
-            )
+            .child(SectionHeader::new(flow.title.clone()).description(trf!(
+                "{done} of {total} steps done",
+                "{total} ステップ中 {done} 完了"
+            )))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(theme.spacing.md)
-                    .child(Label::caption("Where it runs"))
+                    .child(Label::caption(tr("Where it runs", "実行場所")))
                     .child(
-                        Label::new(
-                            target.unwrap_or_else(|| "Not set; Run uses the project below".into()),
-                        )
+                        Label::new(target.unwrap_or_else(|| {
+                            tr(
+                                "Not set; Run uses the project below",
+                                "未設定。実行時は下のプロジェクトを使います",
+                            )
+                            .into()
+                        }))
                         .size(TextSize::Small)
                         .color(TextColor::Muted),
                     )
                     .child(self.project_fields(cx))
                     .child(
                         div().flex().child(
-                            Button::new("use-project", "Use for this workflow")
-                                .size(ControlSize::Small)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.save_project_target(cx)),
-                                ),
+                            Button::new(
+                                "use-project",
+                                tr("Use for this workflow", "このワークフローに使う"),
+                            )
+                            .size(ControlSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_project_target(cx))),
                         ),
                     )
                     .child(
                         Switch::new("publish", publish)
-                            .label("Open a pull request when every step is done")
+                            .label(tr(
+                                "Open a pull request when every step is done",
+                                "全ステップ完了時にプルリクエストを作成",
+                            ))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.set_publish(!publish, cx)),
                             ),
@@ -706,7 +750,7 @@ impl Maestro {
                     .flex()
                     .flex_col()
                     .gap(theme.spacing.xxs)
-                    .child(Label::caption("Steps"))
+                    .child(Label::caption(tr("Steps", "ステップ")))
                     .children(steps),
             )
             .into_any_element()
