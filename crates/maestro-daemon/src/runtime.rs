@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use crate::snapshot::SavedAgent;
 use maestro_agents::{AgentSession, WorkerConfig};
 use maestro_core::{AgentEvent, AgentId, AgentRole, AgentSpec, Workspace};
 use maestro_host::github::{self, PullRequestDraft};
@@ -45,6 +46,47 @@ impl Runtime {
             listener: OnceLock::new(),
             this: this.clone(),
         })
+    }
+
+    /// Takes back the agents a snapshot remembers. They have exited; new agents get later ids.
+    pub(crate) fn restore(&self, saved: Vec<SavedAgent>) {
+        let mut agents = self.agents.lock().expect("agents lock");
+        for SavedAgent { id, spec, transcript } in saved {
+            self.next_agent.fetch_max(id.0 + 1, Ordering::Relaxed);
+            let agent = Agent { spec, status: AgentStatus::Exited, session: None, transcript };
+            agents.insert(id, agent);
+        }
+    }
+
+    /// Every agent, for a snapshot.
+    pub(crate) fn saved(&self) -> Vec<SavedAgent> {
+        let agents = self.agents.lock().expect("agents lock");
+        agents
+            .iter()
+            .map(|(&id, agent)| SavedAgent {
+                id,
+                spec: agent.spec.clone(),
+                transcript: agent.transcript.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether any agent is in the middle of a turn or waiting for the user. An agent between
+    /// turns may be stopped and started again later without losing anything.
+    pub(crate) fn busy(&self) -> bool {
+        let agents = self.agents.lock().expect("agents lock");
+        agents.values().any(|agent| {
+            matches!(agent.status, AgentStatus::Working | AgentStatus::AwaitingPermission)
+        })
+    }
+
+    /// Stops every agent process.
+    pub(crate) fn stop_all(&self) {
+        for agent in self.agents.lock().expect("agents lock").values() {
+            if let Some(session) = &agent.session {
+                session.stop();
+            }
+        }
     }
 
     /// Sends every later agent event to `listener` too.

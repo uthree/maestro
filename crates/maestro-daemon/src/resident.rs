@@ -1,10 +1,13 @@
 //! The daemon's command line, shared by `maestro-daemon` and any frontend that carries the
 //! daemon in its own executable.
 //!
-//! * `maestro-daemon serve [--socket PATH]` runs the resident daemon: one [`Hub`] behind a Unix
-//!   socket, outliving every frontend, so agents keep working while the laptop sleeps and a GUI
-//!   and a TUI can watch the same work. It keeps the router's catalog (`router.json`, the user's
-//!   to edit) and its record of outcomes in `$MAESTRO_HOME`, or `~/.maestro`.
+//! * `maestro-daemon serve [--socket PATH] [--idle SECONDS]` runs the resident daemon: one
+//!   [`Hub`] behind a Unix socket, outliving every frontend, so agents keep working while the
+//!   laptop sleeps and a GUI and a TUI can watch the same work. It keeps the router's catalog
+//!   (`router.json`, the user's to edit), its record of outcomes, and its workflows and
+//!   transcripts (`state.json`) in `$MAESTRO_HOME`, or `~/.maestro`. Once no frontend has been
+//!   connected and no agent has been busy for `--idle` seconds (ten minutes unless given; `0`
+//!   for never), it saves, stops its agents and exits; the next frontend starts it again.
 //! * `maestro-daemon --stdio [--socket PATH]` is what a frontend runs, directly or as
 //!   `ssh host maestro-daemon --stdio`. It relays stdio to the resident daemon, starting one first
 //!   if none answers, and replacing one that speaks an older protocol than its own (left running
@@ -14,6 +17,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use crate::Hub;
 
@@ -27,13 +31,22 @@ pub fn requested(args: &[String]) -> bool {
 /// started as this same executable, so a frontend that calls this when [`requested`] is its own
 /// daemon.
 pub fn run(args: &[String]) -> ExitCode {
-    let (mode, socket) = match args {
-        [mode] => (mode.as_str(), None),
-        [mode, flag, path] if flag == "--socket" => (mode.as_str(), Some(PathBuf::from(path))),
-        _ => return usage(),
-    };
-    let result = match mode {
-        "serve" => platform::serve(socket),
+    let Some((mode, options)) = args.split_first() else { return usage() };
+    let mut socket = None;
+    let mut idle = Some(DEFAULT_IDLE);
+    for pair in options.chunks(2) {
+        match pair {
+            [flag, path] if flag == "--socket" => socket = Some(PathBuf::from(path)),
+            [flag, seconds] if flag == "--idle" && mode == "serve" => match seconds.parse() {
+                Ok(0) => idle = None,
+                Ok(seconds) => idle = Some(Duration::from_secs(seconds)),
+                Err(_) => return usage(),
+            },
+            _ => return usage(),
+        }
+    }
+    let result = match mode.as_str() {
+        "serve" => platform::serve(socket, idle),
         "--stdio" => platform::relay(socket),
         _ => return usage(),
     };
@@ -46,8 +59,11 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
+/// How long the resident daemon waits with nothing to do before it exits.
+const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
+
 fn usage() -> ExitCode {
-    eprintln!("usage: maestro-daemon (serve | --stdio) [--socket PATH]");
+    eprintln!("usage: maestro-daemon (serve [--idle SECONDS] | --stdio) [--socket PATH]");
     ExitCode::from(2)
 }
 
@@ -85,7 +101,7 @@ mod platform {
         Ok(PathBuf::from(home).join(".maestro"))
     }
 
-    pub(super) fn serve(socket: Option<PathBuf>) -> io::Result<()> {
+    pub(super) fn serve(socket: Option<PathBuf>, idle: Option<Duration>) -> io::Result<()> {
         let socket = socket.map_or_else(default_socket, Ok)?;
         if let Some(directory) = socket.parent() {
             // Only this user may reach the socket: it can start processes as them.
@@ -103,7 +119,12 @@ mod platform {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         // Beside the socket, so `kill $(cat daemon.pid)` stops a daemon nothing else can reach.
         std::fs::write(socket.with_extension("pid"), std::process::id().to_string())?;
-        let hub = Hub::open(&home()?)?;
+        let home = home()?;
+        let hub = Hub::open(&home)?;
+        if let Some(limit) = idle {
+            let hub = hub.clone();
+            thread::spawn(move || exit_when_idle(&hub, limit, &socket, &home));
+        }
         for stream in listener.incoming() {
             let stream = stream?;
             let hub = hub.clone();
@@ -118,13 +139,42 @@ mod platform {
         Ok(())
     }
 
+    /// Exits the process once the hub has been idle for `limit`.
+    fn exit_when_idle(hub: &Hub, limit: Duration, socket: &Path, home: &Path) {
+        let mut since = None;
+        loop {
+            thread::sleep(Duration::from_secs(1).min(limit));
+            if !hub.idle() {
+                since = None;
+                continue;
+            }
+            if since.get_or_insert_with(Instant::now).elapsed() < limit {
+                continue;
+            }
+            // Stop answering first, so a frontend arriving now starts a new daemon.
+            std::fs::remove_file(socket).ok();
+            std::fs::remove_file(socket.with_extension("pid")).ok();
+            if let Err(error) = hub.shut_down(home) {
+                eprintln!("maestro-daemon: could not save the state: {error}");
+            }
+            std::process::exit(0);
+        }
+    }
+
     pub(super) fn relay(socket: Option<PathBuf>) -> io::Result<()> {
         let socket = socket.map_or_else(default_socket, Ok)?;
         let mut stream = match UnixStream::connect(&socket) {
             Ok(stream) => stream,
             Err(_) => start(&socket)?,
         };
-        let mut hello = greeting(&mut stream)?;
+        let mut hello = match greeting(&mut stream) {
+            Ok(hello) => hello,
+            // It was exiting for want of work just as this connected.
+            Err(_) => {
+                stream = start(&socket)?;
+                greeting(&mut stream)?
+            }
+        };
         if let Ok(ServerMessage::Hello { protocol }) = serde_json::from_slice(&hello)
             && protocol < PROTOCOL_VERSION
         {
@@ -225,10 +275,11 @@ mod platform {
 mod platform {
     use std::io;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::Hub;
 
-    pub(super) fn serve(_: Option<PathBuf>) -> io::Result<()> {
+    pub(super) fn serve(_: Option<PathBuf>, _: Option<Duration>) -> io::Result<()> {
         Err(io::Error::other("the resident daemon needs a Unix host; use --stdio"))
     }
 

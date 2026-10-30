@@ -81,3 +81,31 @@ fn a_daemon_left_from_an_older_version_is_replaced() {
     let pid = std::fs::read_to_string(socket.with_extension("pid")).unwrap();
     Process::new("kill").arg(pid.trim()).status().unwrap();
 }
+
+#[test]
+fn an_idle_daemon_exits_and_the_next_one_remembers() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("daemon.sock");
+    let mut daemon = Process::new(env!("CARGO_BIN_EXE_maestro-daemon"))
+        .args(["serve", "--idle", "1", "--socket"])
+        .arg(&socket)
+        .env("MAESTRO_HOME", socket.with_file_name("home"))
+        .spawn()
+        .unwrap();
+    while !socket.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let created = once(&socket, Command::CreateWorkflow { title: "kept".into() });
+    assert!(matches!(created, Reply::WorkflowCreated { .. }));
+    // With no one connected and nothing running, it saves, cleans up and goes.
+    assert!(daemon.wait().unwrap().success());
+    assert!(!socket.exists());
+
+    // The relay starts a new daemon, which has the workflow back.
+    let Reply::Workflows { workflows } = once(&socket, Command::ListWorkflows) else { panic!() };
+    let pid = std::fs::read_to_string(socket.with_extension("pid")).unwrap();
+    Process::new("kill").arg(pid.trim()).status().unwrap();
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].title, "kept");
+}

@@ -123,10 +123,10 @@ impl Engine {
                     .ok_or_else(|| refused(format!("node {node} is not in this workflow")))?
                     .agent
                     .ok_or_else(|| refused("the node has not started; edit it instead"))?;
-                let worker = self
-                    .workers
-                    .get_mut(&agent)
-                    .ok_or_else(|| refused("the node's worker has exited"))?;
+                let Some(worker) = self.workers.get_mut(&agent) else {
+                    // Its worker has exited, perhaps with an earlier daemon: start another.
+                    return self.revive(workflow, node, text);
+                };
                 worker.revisions += 1;
                 self.set_status(workflow, node, NodeStatus::Running);
                 self.runtime.execute(Command::SendToAgent { agent, text })
@@ -260,12 +260,7 @@ impl Engine {
         };
 
         let branch = format!("maestro/{}-{}", flow.id, id);
-        let path = target.worktrees.join(branch.replace('/', "-"));
-        let workspace = Workspace {
-            host: target.host.clone(),
-            repository: target.repository.clone(),
-            worktree: Some(Worktree { branch: branch.clone(), base: target.base.clone(), path }),
-        };
+        let workspace = node_workspace(&target, &branch);
         prepare_worktree(&workspace).map_err(|error| error.to_string())?;
         let path = workspace.working_directory().clone();
         let mut done = Vec::new();
@@ -304,6 +299,48 @@ impl Engine {
         );
         self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
         Ok(())
+    }
+
+    /// Starts a new worker on a node whose worker has exited, in the node's worktree, with what
+    /// the user now asks.
+    fn revive(
+        &mut self,
+        workflow: WorkflowId,
+        id: NodeId,
+        text: String,
+    ) -> Result<Reply, CommandError> {
+        let flow = self.snapshot(workflow)?;
+        let target = flow.target.clone().ok_or_else(|| refused("the workflow has no target"))?;
+        let node =
+            flow.node(id).ok_or_else(|| refused(format!("node {id} is not in this workflow")))?;
+        let (Some(branch), Some(model)) = (node.branch.clone(), node.model.clone()) else {
+            return Err(refused("the node has not started; edit it instead"));
+        };
+        let workspace = node_workspace(&target, &branch);
+        prepare_worktree(&workspace).map_err(failed)?;
+        let path = workspace.working_directory().clone();
+        let prompt = format!(
+            "This step is part of \"{}\". You worked on it before, and that work is committed on \
+             this branch.\n\n# {}\n\n{}\n\n# What the user asks now\n\n{text}",
+            flow.title, node.title, node.instructions
+        );
+        let spec = AgentSpec { role: AgentRole::Worker, model: model.clone(), workspace };
+        let agent = self.runtime.start(spec, WORKER_INSTRUCTIONS.into(), &prompt)?;
+        self.workers.insert(
+            agent,
+            Worker {
+                workflow,
+                node: id,
+                host: target.host.clone(),
+                path,
+                model: ModelKey { provider: model.provider, model: model.model.clone() },
+                difficulty: node.difficulty.unwrap_or(Difficulty::Moderate),
+                started: Instant::now(),
+                revisions: 1,
+            },
+        );
+        self.update(workflow, |flow| flow.assign(id, agent, model, branch).ok())?;
+        Ok(Reply::Done)
     }
 
     /// Merges every node's branch into one, pushes it and opens a pull request.
@@ -451,4 +488,17 @@ fn outcome_key(workflow: WorkflowId, node: NodeId) -> String {
 
 fn refused(message: impl Into<String>) -> CommandError {
     CommandError::Workflow { message: message.into() }
+}
+
+/// The worktree a node's work lives in, on its own branch beside the workflow's repository.
+fn node_workspace(target: &WorkflowTarget, branch: &str) -> Workspace {
+    Workspace {
+        host: target.host.clone(),
+        repository: target.repository.clone(),
+        worktree: Some(Worktree {
+            branch: branch.into(),
+            base: target.base.clone(),
+            path: target.worktrees.join(branch.replace('/', "-")),
+        }),
+    }
 }
