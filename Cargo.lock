@@ -3635,6 +3635,7 @@ dependencies = [
  "maestro-core",
  "maestro-daemon",
  "maestro-protocol",
+ "sys-locale",
 ]
 
 [[package]]
