@@ -14,8 +14,8 @@ use atelier::{
 };
 use futures::StreamExt;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Pixels, Render, ScrollHandle, SharedString,
-    Styled, Window, div, prelude::*, px,
+    AnyWindowHandle, App, Context, Entity, IntoElement, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::input::InputState;
 use maestro_client::mirror::Notice;
@@ -28,8 +28,8 @@ use maestro_core::{
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
 use crate::graph::Canvas;
-use crate::i18n::tr;
-use crate::{input, link, trf};
+use crate::i18n::{self, Lang, tr};
+use crate::{input, link, settings, trf};
 
 /// Narrowest window that still shows the sidebar beside the conversation and the workflow.
 const SIDEBAR_MIN_WINDOW: f32 = 1280.;
@@ -134,6 +134,27 @@ pub struct Fields {
     pub base: Entity<InputState>,
 }
 
+impl Fields {
+    /// The placeholders of the composer, the node message, the step's title and its
+    /// instructions, in the current language.
+    fn placeholders() -> [&'static str; 4] {
+        [
+            tr("Describe what to build…", "作りたいものを説明してください…"),
+            tr("Ask this worker for changes…", "このワーカーへの修正依頼…"),
+            tr("Step name", "ステップ名"),
+            tr("What the worker should do", "ワーカーにやってほしいこと"),
+        ]
+    }
+
+    /// Puts the placeholders in the current language.
+    fn translate(&self, window: &mut Window, cx: &mut App) {
+        let fields = [&self.composer, &self.node_message, &self.title, &self.instructions];
+        for (field, placeholder) in fields.into_iter().zip(Self::placeholders()) {
+            field.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+        }
+    }
+}
+
 /// The window.
 pub struct Maestro {
     pub(crate) launch: Launch,
@@ -176,6 +197,10 @@ pub struct Maestro {
     /// How many notices have been seen, so a new one can be announced.
     pub(crate) notices_seen: usize,
     pub(crate) fields: Fields,
+    /// The settings window, while it is open.
+    pub(crate) settings: Option<AnyWindowHandle>,
+    /// The language the fields' placeholders are in.
+    placeholders: Lang,
 }
 
 impl Maestro {
@@ -187,29 +212,12 @@ impl Maestro {
         cx: &mut Context<Self>,
     ) -> Self {
         let repository = project.repository.as_ref().map(|path| path.display().to_string());
+        let [composer, node_message, title, instructions] = Fields::placeholders();
         let fields = Fields {
-            composer: input::area(
-                tr("Describe what to build…", "作りたいものを説明してください…"),
-                "",
-                8,
-                window,
-                cx,
-            ),
-            node_message: input::area(
-                tr("Ask this worker for changes…", "このワーカーへの修正依頼…"),
-                "",
-                6,
-                window,
-                cx,
-            ),
-            title: input::line(tr("Step name", "ステップ名"), "", window, cx),
-            instructions: input::area(
-                tr("What the worker should do", "ワーカーにやってほしいこと"),
-                "",
-                12,
-                window,
-                cx,
-            ),
+            composer: input::area(composer, "", 8, window, cx),
+            node_message: input::area(node_message, "", 6, window, cx),
+            title: input::line(title, "", window, cx),
+            instructions: input::area(instructions, "", 12, window, cx),
             repository: input::line(
                 "/path/to/repository",
                 &repository.unwrap_or_default(),
@@ -242,6 +250,8 @@ impl Maestro {
             error: None,
             notices_seen: 0,
             fields,
+            settings: None,
+            placeholders: i18n::lang(),
         };
         view.connect(cx);
         view
@@ -730,6 +740,11 @@ impl Maestro {
                 )
             })
             .trailing(
+                Button::icon_only("open-settings", IconName::Settings)
+                    .tooltip(tr("Settings", "設定"))
+                    .on_click(cx.listener(|this, _, _, cx| settings::open(this, cx))),
+            )
+            .trailing(
                 Button::icon_only("toggle-workflow", IconName::SidebarRight)
                     .tooltip(if self.workflow_open {
                         tr("Hide workflow", "ワークフローを隠す")
@@ -851,6 +866,10 @@ fn text_color(tone: Tone) -> TextColor {
 impl Render for Maestro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fill_fields(window, cx);
+        if self.placeholders != i18n::lang() {
+            self.placeholders = i18n::lang();
+            self.fields.translate(window, cx);
+        }
         let theme = cx.theme().clone();
         self.window_width = window.viewport_size().width;
         let (sidebar, room) = self.room(cx);
