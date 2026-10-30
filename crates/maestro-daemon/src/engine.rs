@@ -445,6 +445,7 @@ impl Engine {
                     })?;
                 // The user agreed to the plan before the commander wrote it: set it going.
                 workflow.started = workflow.target.is_some();
+                workflow.planned_by = Some(agent);
                 Ok(inner.state.insert(workflow).clone())
             });
             match built {

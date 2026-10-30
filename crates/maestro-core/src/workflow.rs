@@ -194,6 +194,8 @@ pub struct Workflow {
     pub title: String,
     /// Where its workers run; a workflow without one can be drawn and edited, not run.
     pub target: Option<WorkflowTarget>,
+    /// The commander whose plan it came from, if one wrote it.
+    pub planned_by: Option<AgentId>,
     /// Whether it has been set going: its nodes then start by themselves as soon as what they
     /// wait for has succeeded, including nodes of other workflows.
     pub started: bool,
@@ -212,6 +214,9 @@ struct WorkflowRepr {
     #[serde(default)]
     target: Option<WorkflowTarget>,
     #[serde(default)]
+    planned_by: Option<AgentId>,
+    // A state.json saved before workflows could be started has none.
+    #[serde(default)]
     started: bool,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -224,6 +229,7 @@ impl From<WorkflowRepr> for Workflow {
             id: repr.id,
             title: repr.title,
             target: repr.target,
+            planned_by: repr.planned_by,
             started: repr.started,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
@@ -238,6 +244,7 @@ impl From<Workflow> for WorkflowRepr {
             id: flow.id,
             title: flow.title,
             target: flow.target,
+            planned_by: flow.planned_by,
             started: flow.started,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
@@ -253,6 +260,7 @@ impl Workflow {
             id,
             title: title.into(),
             target: None,
+            planned_by: None,
             started: false,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),
@@ -579,7 +587,20 @@ mod tests {
         flow.id = WorkflowId(2);
         flow.started = true;
         flow.wait_for(a, NodeRef { workflow: WorkflowId(1), node: NodeId(1) }).unwrap();
+        flow.planned_by = Some(AgentId(7));
         let text = serde_json::to_string(&flow).unwrap();
         assert_eq!(serde_json::from_str::<Workflow>(&text).unwrap(), flow);
+    }
+
+    #[test]
+    fn reads_a_workflow_saved_by_an_older_daemon() {
+        let (flow, _) = diamond();
+        let mut saved = serde_json::to_value(&flow).unwrap();
+        let fields = saved.as_object_mut().unwrap();
+        fields.remove("started");
+        fields.remove("planned_by");
+        let read = serde_json::from_value::<Workflow>(saved).unwrap();
+        assert!(!read.started);
+        assert_eq!(read.planned_by, None);
     }
 }

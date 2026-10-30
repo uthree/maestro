@@ -14,8 +14,8 @@ use atelier::{
 };
 use futures::StreamExt;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
-    prelude::*, px,
+    Context, Entity, IntoElement, ParentElement, Pixels, Render, ScrollHandle, SharedString,
+    Styled, Window, div, prelude::*, px,
 };
 use gpui_component::input::InputState;
 use maestro_client::mirror::Notice;
@@ -31,8 +31,52 @@ use crate::graph::Canvas;
 use crate::i18n::tr;
 use crate::{input, link, trf};
 
-/// Narrowest window that still shows the sidebar.
-const SIDEBAR_MIN_WINDOW: f32 = 1180.;
+/// Narrowest window that still shows the sidebar beside the conversation and the workflow.
+const SIDEBAR_MIN_WINDOW: f32 = 1280.;
+/// The sidebar's width.
+pub const SIDEBAR_WIDTH: f32 = 256.;
+/// The narrowest the conversation gets with the workflow open beside it.
+const CHAT_MIN_WIDTH: f32 = 400.;
+/// The narrowest the workflow pane gets beside the conversation.
+const PANE_MIN_WIDTH: f32 = 560.;
+/// The workflow pane's share of the room beside the sidebar.
+const PANE_SHARE: f32 = 0.58;
+
+/// Where a workflow's steps are, counted once for every place that shows it.
+pub struct Progress {
+    /// How many steps it has.
+    pub total: usize,
+    /// How many are done.
+    pub done: usize,
+    /// How many wait for the user.
+    pub waiting: usize,
+    /// How many failed.
+    pub failed: usize,
+    /// It has steps and none is running or waiting, and not all are done: Run starts it.
+    pub ready: bool,
+    /// Every step is done: its pull request can be opened.
+    pub finished: bool,
+}
+
+impl Progress {
+    /// Counts `flow`'s steps.
+    pub fn of(flow: &Workflow) -> Self {
+        let count = |status| flow.nodes().filter(|node| node.status == status).count();
+        let total = flow.nodes().count();
+        let done = count(NodeStatus::Succeeded);
+        let waiting = count(NodeStatus::AwaitingUser);
+        let running = count(NodeStatus::Running) + waiting;
+        let finished = total > 0 && done == total;
+        Self {
+            total,
+            done,
+            waiting,
+            failed: count(NodeStatus::Failed),
+            ready: total > 0 && running == 0 && !finished,
+            finished,
+        }
+    }
+}
 
 /// The repository commanders read and workflows run in, on the daemon's machine.
 pub struct Project {
@@ -96,16 +140,26 @@ pub struct Maestro {
     pub(crate) connection: Connection,
     pub(crate) mirror: Mirror,
     pub(crate) project: Project,
-    /// The workflow on the canvas.
+    /// The workflow on the canvas, whether or not its pane is open.
     pub(crate) workflow: Option<WorkflowId>,
+    /// Whether the workflow pane is open beside the conversation.
+    pub(crate) workflow_open: bool,
+    /// Whether the workflow pane fills the window in place of the conversation.
+    pub(crate) workflow_full: bool,
     /// The node in the inspector.
     pub(crate) selected: Option<NodeId>,
     /// Which node the title and instruction fields were filled from.
     pub(crate) editing: Option<(WorkflowId, NodeId)>,
-    /// The commander in the panel.
+    /// The commander in the conversation.
     pub(crate) conversation: Option<AgentId>,
-    pub(crate) panel_open: bool,
+    /// Where the conversation is scrolled.
+    pub(crate) chat_scroll: ScrollHandle,
+    /// Which conversation was drawn last and how many rows it had, to follow it as it grows.
+    pub(crate) chat_length: (Option<AgentId>, usize),
     pub(crate) sidebar_open: bool,
+    /// The window's width at the last frame, which decides whether the conversation and the
+    /// workflow fit side by side.
+    pub(crate) window_width: Pixels,
     /// The inspector's tab: the node's details or its worker.
     pub(crate) node_tab: usize,
     /// The CLI a new commander runs on.
@@ -168,11 +222,15 @@ impl Maestro {
             mirror: Mirror::default(),
             project,
             workflow: None,
+            workflow_open: false,
+            workflow_full: false,
             selected: None,
             editing: None,
             conversation: None,
-            panel_open: true,
+            chat_scroll: ScrollHandle::new(),
+            chat_length: (None, 0),
             sidebar_open: true,
+            window_width: px(0.),
             node_tab: 0,
             provider: ProviderKind::ClaudeCode,
             canvas: Canvas::default(),
@@ -236,7 +294,8 @@ impl Maestro {
     fn receive(&mut self, event: Event, cx: &mut Context<Self>) {
         self.mirror.apply(&event);
         match event {
-            // A plan from the conversation on screen is what the user wants to see next.
+            // A plan from the conversation on screen is what the user wants to see next; it
+            // shows in the conversation as a card, and its pane stays as the user left it.
             Event::Planned { agent, workflow } if Some(agent) == self.conversation => {
                 self.show_workflow(workflow);
             }
@@ -295,6 +354,35 @@ impl Maestro {
             self.selected = None;
             self.canvas.reset();
         }
+    }
+
+    /// Opens `workflow` in the pane beside the conversation.
+    pub(crate) fn open_workflow(&mut self, workflow: WorkflowId) {
+        self.show_workflow(workflow);
+        self.workflow_open = true;
+    }
+
+    /// Closes the workflow pane, leaving the conversation.
+    pub(crate) fn close_workflow(&mut self, cx: &mut Context<Self>) {
+        self.workflow_open = false;
+        self.workflow_full = false;
+        cx.notify();
+    }
+
+    /// The room beside the sidebar, and whether the sidebar takes its share of the window.
+    fn room(&self, cx: &Context<Self>) -> (bool, Pixels) {
+        let width = self.window_width;
+        let pane = self.workflow_open && self.workflow.is_some();
+        // The sidebar folds away first, so the conversation and the workflow keep their room.
+        let sidebar = self.sidebar_open
+            && width >= cx.theme().density.sidebar_width
+            && (!pane || width >= px(SIDEBAR_MIN_WINDOW));
+        (sidebar, if sidebar { width - px(SIDEBAR_WIDTH) } else { width })
+    }
+
+    /// Whether the conversation and the workflow fit side by side in this window.
+    pub(crate) fn chat_fits_beside(&self) -> bool {
+        self.window_width >= px(CHAT_MIN_WIDTH + PANE_MIN_WIDTH)
     }
 
     /// Selects a node; the edit fields are filled from it at the next frame.
@@ -385,7 +473,7 @@ impl Maestro {
 
     pub(crate) fn new_conversation(&mut self, cx: &mut Context<Self>) {
         self.conversation = None;
-        self.panel_open = true;
+        self.workflow_full = false;
         cx.notify();
     }
 
@@ -416,16 +504,15 @@ impl Maestro {
             cx,
             |this, reply, _| {
                 if let Reply::WorkflowCreated { workflow } = reply {
-                    this.show_workflow(workflow);
+                    this.open_workflow(workflow);
                 }
             },
         );
     }
 
-    /// Runs the workflow on screen, first giving it the project as its target if it has none.
-    pub(crate) fn run(&mut self, cx: &mut Context<Self>) {
-        let Some(flow) = self.current() else { return };
-        let workflow = flow.id;
+    /// Runs a workflow, first giving it the project as its target if it has none.
+    pub(crate) fn run(&mut self, workflow: WorkflowId, cx: &mut Context<Self>) {
+        let Some(flow) = self.mirror.workflows.get(&workflow) else { return };
         if flow.target.is_some() {
             return self.command(Command::RunWorkflow { workflow }, cx);
         }
@@ -449,8 +536,7 @@ impl Maestro {
         );
     }
 
-    pub(crate) fn publish(&mut self, cx: &mut Context<Self>) {
-        let Some(workflow) = self.workflow else { return };
+    pub(crate) fn publish(&mut self, workflow: WorkflowId, cx: &mut Context<Self>) {
         self.command(Command::PublishWorkflow { workflow }, cx);
     }
 
@@ -580,32 +666,20 @@ impl Maestro {
     // Drawing.
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let flow = self.current();
-        let title: SharedString = flow.map_or("Maestro".into(), |flow| flow.title.clone().into());
-        let place = link::describe(&self.launch);
-        let subtitle = match &self.project.repository {
-            Some(path) => format!("{} · {place}", path.display()),
-            None => place,
-        };
-        let running = flow.is_some_and(|flow| {
-            flow.nodes()
-                .any(|node| matches!(node.status, NodeStatus::Running | NodeStatus::AwaitingUser))
-        });
-        let finished = flow.is_some_and(|flow| {
-            flow.nodes().next().is_some()
-                && flow.nodes().all(|node| node.status == NodeStatus::Succeeded)
-        });
-        let waiting = flow.map_or(0, |flow| {
-            flow.nodes().filter(|node| node.status == NodeStatus::AwaitingUser).count()
-        });
-        let failed = flow.map_or(0, |flow| {
-            flow.nodes().filter(|node| node.status == NodeStatus::Failed).count()
-        });
-        let ready = flow.is_some_and(|flow| flow.nodes().next().is_some()) && !running && !finished;
+        let full = self.workflow_open && (self.workflow_full || !self.chat_fits_beside());
         let conversation = self.conversation.and_then(|agent| self.mirror.agents.get(&agent));
-        let status = conversation.map_or(atelier::agent::AgentStatus::Idle, |view| {
-            crate::panels::agent_status(view.status, !view.transcript.entries.is_empty())
+        let title: SharedString = match (self.current(), conversation) {
+            (Some(flow), _) if full => flow.title.clone().into(),
+            (_, Some(view)) => crate::chat::conversation_title(view).into(),
+            _ => "Maestro".into(),
+        };
+        let status = conversation.map(|view| {
+            crate::chat::agent_status(view.status, !view.transcript.entries.is_empty())
         });
+        // Steps waiting for the user anywhere, so they are seen with the workflow closed.
+        let waiting: usize =
+            self.mirror.workflows.values().map(|flow| Progress::of(flow).waiting).sum();
+        let has_workflow = self.workflow.is_some();
 
         TitleBar::new()
             .leading(
@@ -621,42 +695,30 @@ impl Maestro {
                     })),
             )
             .title(title)
-            .subtitle(subtitle)
-            .when(flow.is_some(), |bar| {
-                bar.child(if finished {
-                    Button::new("publish", tr("Open pull request", "プルリクエストを作成"))
-                        .primary()
-                        .icon(IconName::ArrowUp)
-                        .size(ControlSize::Small)
-                        .on_click(cx.listener(|this, _, _, cx| this.publish(cx)))
-                } else {
-                    Button::new("run", tr("Run", "実行"))
-                        .primary()
-                        .icon(IconName::Play)
-                        .size(ControlSize::Small)
-                        .disabled(!ready)
-                        .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
-                })
-            })
+            .children(status.filter(|_| !full).map(atelier::agent::AgentStatusLabel::new))
             .when(waiting > 0, |bar| {
-                bar.child(
+                bar.trailing(
                     Badge::new(trf!("{waiting} waiting for you", "{waiting} 件があなた待ち"))
                         .tone(Tone::Warning)
                         .icon(IconName::Alert),
                 )
             })
-            .when(failed > 0, |bar| {
-                bar.child(
-                    Badge::new(trf!("{failed} failed", "{failed} 件失敗"))
-                        .tone(Tone::Danger)
-                        .icon(IconName::Alert),
-                )
-            })
             .trailing(
-                atelier::agent::AgentToggle::new("commander-toggle", self.panel_open, status)
+                Button::icon_only("toggle-workflow", IconName::SidebarRight)
+                    .tooltip(if self.workflow_open {
+                        tr("Hide workflow", "ワークフローを隠す")
+                    } else {
+                        tr("Show workflow", "ワークフローを表示")
+                    })
+                    .selected(self.workflow_open)
+                    .disabled(!has_workflow)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.panel_open = !this.panel_open;
-                        cx.notify();
+                        if this.workflow_open {
+                            this.close_workflow(cx);
+                        } else {
+                            this.workflow_open = true;
+                            cx.notify();
+                        }
                     })),
             )
     }
@@ -764,30 +826,29 @@ impl Render for Maestro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fill_fields(window, cx);
         let theme = cx.theme().clone();
-        let width = window.viewport_size().width;
-        let sidebar = self.sidebar_open && width >= px(SIDEBAR_MIN_WINDOW);
-        let panel_width = if width >= px(SIDEBAR_MIN_WINDOW) { 380. } else { 320. };
+        self.window_width = window.viewport_size().width;
+        let (sidebar, room) = self.room(cx);
+        let pane = self.workflow_open && self.current().is_some();
+        // Below the width both need, the workflow takes the conversation's place.
+        let full = pane && (self.workflow_full || room < px(CHAT_MIN_WIDTH + PANE_MIN_WIDTH));
+        let pane_width = if full {
+            room
+        } else {
+            (room * PANE_SHARE).max(px(PANE_MIN_WIDTH)).min(room - px(CHAT_MIN_WIDTH))
+        };
 
         let body = match &self.connection {
-            Connection::Ready(_) => div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .when(sidebar, |row| row.child(self.sidebar(cx)))
-                .child(match self.workflow {
-                    Some(_) => self.graph(cx).into_any_element(),
-                    None => self.welcome(cx).into_any_element(),
-                })
-                .map(|row| {
-                    if self.panel_open {
-                        row.child(self.commander_panel(panel_width, cx).into_any_element())
-                    } else if self.workflow.is_some() {
-                        row.child(self.inspector(cx).into_any_element())
-                    } else {
-                        row
-                    }
-                })
-                .into_any_element(),
+            Connection::Ready(_) => {
+                let chat = (!full).then(|| self.chat(cx).into_any_element());
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .when(sidebar, |row| row.child(self.sidebar(cx)))
+                    .children(chat)
+                    .when(pane, |row| row.child(self.workflow_pane(pane_width, full, cx)))
+                    .into_any_element()
+            }
             Connection::Connecting => self.connecting(cx).into_any_element(),
             Connection::Lost(reason) => self.lost(reason.clone(), cx).into_any_element(),
         };

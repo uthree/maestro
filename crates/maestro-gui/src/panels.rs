@@ -1,103 +1,30 @@
-//! Everything around the canvas: the sidebar, the commander's panel, the inspector, and the
-//! screens shown before there is a workflow to draw.
+//! Everything around the conversation: the sidebar, the workflow pane that opens beside it with
+//! its canvas and inspector, and the screens shown before the daemon answers.
 
-use atelier::agent::{
-    AgentPanel, ApprovalCard, AssistantMessage, ChatNotice, Composer, ConversationRow,
-    ReasoningBlock, ThinkingIndicator, ToolCall, ToolGroup, UserMessage,
-};
+use atelier::agent::{Composer, ConversationRow};
 use atelier::{
-    ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, Edge, EmptyState, IconName,
-    Label, ListItem, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner, Switch, Tabs,
-    TextColor, TextField, TextSize,
+    ActiveTheme, Badge, Button, ButtonVariant, ControlSize, Edge, EmptyState, IconName, Label,
+    ListItem, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner, Switch, Tabs, TextColor,
+    TextField, TextSize, Tone,
 };
-use gpui::{
-    AnyElement, Context, ElementId, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::*, px,
-};
-use maestro_client::mirror::{AgentView, Entry, ToolState};
+use gpui::{Context, IntoElement, ParentElement, Pixels, Styled, div, prelude::*, px};
+use maestro_client::mirror::AgentView;
 use maestro_core::{
     AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeRef, NodeStatus,
-    PermissionKind, ProviderKind,
+    ProviderKind,
 };
-use maestro_protocol::AgentStatus;
 
-use crate::app::Maestro;
+use crate::app::{Maestro, Progress};
+use crate::chat::{agent_status, conversation_title, provider_logo};
 use crate::graph::{model_label, status_label, status_tone};
 use crate::i18n::{self, tr};
 use crate::{input, link, trf};
 
-/// How an agent's status reads in Atelier's vocabulary.
-pub fn agent_status(status: AgentStatus, has_history: bool) -> atelier::agent::AgentStatus {
-    use atelier::agent::AgentStatus as Shown;
-    match status {
-        AgentStatus::Working => Shown::Running,
-        AgentStatus::AwaitingPermission => Shown::AwaitingApproval,
-        AgentStatus::Idle if has_history => Shown::Completed,
-        AgentStatus::Idle => Shown::Idle,
-        AgentStatus::Exited => Shown::Failed,
-    }
-}
+/// The inspector's width beside the canvas.
+pub const INSPECTOR_WIDTH: f32 = 360.;
 
-/// A conversation's name: the start of its first message.
-fn conversation_title(view: &AgentView) -> String {
-    let first = view.transcript.entries.iter().find_map(|entry| match entry {
-        Entry::User(text) => Some(text.as_str()),
-        _ => None,
-    });
-    let Some(first) = first else { return tr("New conversation", "新しい会話").into() };
-    let line = first.lines().next().unwrap_or_default();
-    match line.char_indices().nth(48) {
-        Some((end, _)) => format!("{}…", &line[..end]),
-        None => line.into(),
-    }
-}
-
-/// An element id for a transcript row.
-fn element(kind: &str, key: &str) -> ElementId {
-    ElementId::Name(format!("{kind}-{key}").into())
-}
-
-/// A reply with its plan blocks folded away: the plan is on the canvas, and the panel offers
-/// to open it.
-fn without_plans(text: &str) -> String {
-    let opening = format!("```{}", maestro_core::plan::PLAN_FENCE);
-    let mut shown = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(&opening) {
-        shown.push_str(&rest[..start]);
-        let body = &rest[start + opening.len()..];
-        let Some(end) = body.find("```") else {
-            // Still streaming: hide the half-written plan too.
-            rest = "";
-            break;
-        };
-        shown.push_str(tr("(The plan is in the workflow.)", "（計画はワークフローにあります）"));
-        rest = &body[end + 3..];
-    }
-    shown.push_str(rest);
-    shown
-}
-
-/// What allowing a request of this kind lets the agent do.
-fn approval_body(kind: PermissionKind) -> &'static str {
-    match kind {
-        PermissionKind::Command => tr(
-            "The agent wants to run this command in its worktree.",
-            "エージェントが自分のワークツリーでこのコマンドを実行しようとしています。",
-        ),
-        PermissionKind::FileChange => tr(
-            "The agent wants to change files in its worktree.",
-            "エージェントが自分のワークツリーのファイルを変更しようとしています。",
-        ),
-        PermissionKind::Other => tr(
-            "The agent wants to do something its permissions do not cover.",
-            "エージェントが権限の範囲外の操作をしようとしています。",
-        ),
-    }
-}
-
-/// The inspector's width; the commander's panel uses its own.
-const INSPECTOR_WIDTH: f32 = 360.;
+/// The inspector's height when it sits under the canvas.
+const INSPECTOR_HEIGHT: f32 = 340.;
 
 /// The providers a node can be pinned to, after "let the router choose".
 const RUNS_ON: [&str; 5] = ["Auto", "Claude", "Codex", "Antigravity", "OpenCode"];
@@ -135,7 +62,7 @@ impl Maestro {
                 .selected(self.conversation == Some(id))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.conversation = Some(id);
-                    this.panel_open = true;
+                    this.workflow_full = false;
                     cx.notify();
                 }))
                 .into_any_element()
@@ -160,9 +87,9 @@ impl Maestro {
                         0 => tr("No steps", "ステップなし").to_string(),
                         _ => trf!("{done} of {total} steps done", "{total} ステップ中 {done} 完了"),
                     })
-                    .selected(self.workflow == Some(id))
+                    .selected(self.workflow_open && self.workflow == Some(id))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.show_workflow(id);
+                        this.open_workflow(id);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -171,7 +98,7 @@ impl Maestro {
         let no_conversations = conversations.is_empty();
         let no_workflows = workflows.is_empty();
         Sidebar::new(Edge::Left)
-            .w(px(256.))
+            .w(px(crate::app::SIDEBAR_WIDTH))
             .p(theme.spacing.sm)
             .gap(theme.spacing.xxs)
             .child(
@@ -256,7 +183,7 @@ impl Maestro {
     }
 
     /// The repository and base branch fields.
-    fn project_fields(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn project_fields(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let place = link::describe(&self.launch);
         let field = |label: String, state| {
@@ -276,61 +203,6 @@ impl Maestro {
                 &self.fields.repository,
             ))
             .child(field(tr("Base branch", "ベースブランチ").into(), &self.fields.base))
-    }
-
-    /// What the canvas shows before there is a workflow.
-    pub(crate) fn welcome(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme().clone();
-        div()
-            .id("welcome")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .justify_center()
-            .overflow_y_scroll()
-            .bg(theme.colors.background)
-            .p(theme.spacing.xxl)
-            .child(
-                Card::new()
-                    .w_full()
-                    .max_w(px(560.))
-                    .p(theme.spacing.xl)
-                    .gap(theme.spacing.xl)
-                    .bg(theme.colors.surface)
-                    .child(SectionHeader::new(tr("Plan with the commander", "コマンダーと計画する")).description(
-                        tr(
-                            "Tell the commander what you want built. It plans the work as a \
-                             graph of steps; each step gets its own worker and its own git \
-                             worktree, and you can edit the graph before it runs.",
-                            "作りたいものをコマンダーに伝えてください。コマンダーは作業をステップの\
-                             グラフとして計画し、各ステップには専用のワーカーと git ワークツリーが\
-                             割り当てられます。実行前にグラフを編集することもできます。",
-                        ),
-                    ))
-                    .child(self.project_fields(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(theme.spacing.sm)
-                            .child(
-                                Button::new("welcome-ask", tr("Ask the commander", "コマンダーに頼む"))
-                                    .primary()
-                                    .icon(IconName::Sparkles)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.new_conversation(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new(
-                                    "welcome-empty",
-                                    tr("Start from an empty workflow", "空のワークフローから始める"),
-                                )
-                                    .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
-                            ),
-                    ),
-            )
     }
 
     pub(crate) fn connecting(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -370,248 +242,140 @@ impl Maestro {
         )
     }
 
-    /// An agent's conversation as transcript rows.
-    fn entries(&self, agent: AgentId, view: &AgentView, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
-        let meta = match &view.spec.model.model {
-            model if model.is_empty() => view.spec.model.provider.label().to_string(),
-            model => format!("{} · {model}", view.spec.model.provider.label()),
-        };
-        for (index, entry) in view.transcript.entries.iter().enumerate() {
-            let key: SharedString = format!("{agent}-{index}").into();
-            let open = self.expanded.contains(&key);
-            let toggle = {
-                let key = key.clone();
-                cx.listener(move |this, _, _, cx| {
-                    if !this.expanded.remove(&key) {
-                        this.expanded.insert(key.clone());
-                    }
-                    cx.notify();
-                })
-            };
-            let row = match entry {
-                Entry::User(text) => {
-                    UserMessage::new(text.clone()).id(element("user", &key)).into_any_element()
-                }
-                Entry::Assistant { text, done } => AssistantMessage::new(without_plans(text))
-                    .id(element("assistant", &key))
-                    .meta(meta.clone())
-                    .streaming(!done)
-                    .into_any_element(),
-                Entry::Reasoning(text) => ReasoningBlock::new(
-                    element("reasoning", &key),
-                    tr("Reasoning", "推論"),
-                    text.clone(),
-                )
-                .open(open)
-                .on_toggle(toggle)
-                .into_any_element(),
-                Entry::Tools(tools) => {
-                    let title = match tools.len() {
-                        1 => tr("Used 1 tool", "ツールを 1 回使用").to_string(),
-                        count => trf!("Used {count} tools", "ツールを {count} 回使用"),
-                    };
-                    let mut group = ToolGroup::new(title);
-                    for (call, tool) in tools.iter().enumerate() {
-                        let call_key: SharedString = format!("{key}-{call}").into();
-                        let open = self.expanded.contains(&call_key);
-                        let state = match tool.state {
-                            ToolState::Running => atelier::agent::ToolState::Running,
-                            ToolState::Succeeded => atelier::agent::ToolState::Succeeded,
-                            ToolState::Failed => atelier::agent::ToolState::Failed,
-                        };
-                        let summary: String = tool.call.input.chars().take(80).collect();
-                        let detail = if tool.output.is_empty() {
-                            tool.call.input.clone()
-                        } else {
-                            format!("{}\n\n{}", tool.call.input, tool.output)
-                        };
-                        group = group.call(
-                            ToolCall::new(
-                                element("tool", &call_key),
-                                tool.call.name.clone(),
-                                summary,
-                                state,
-                            )
-                            .icon(IconName::Wrench)
-                            .detail(detail)
-                            .open(open)
-                            .on_toggle(cx.listener(
-                                move |this, _, _, cx| {
-                                    if !this.expanded.remove(&call_key) {
-                                        this.expanded.insert(call_key.clone());
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        );
-                    }
-                    group.into_any_element()
-                }
-                Entry::Permission { request, open: true, .. } => {
-                    let (allow, deny) = (request.id.clone(), request.id.clone());
-                    ApprovalCard::new(
-                        element("approval", &key),
-                        trf!("Allow: {}?", "許可しますか: {}", request.summary),
-                    )
-                    .body(approval_body(request.kind))
-                    .allow_label(tr("Allow", "許可"))
-                    .on_allow(cx.listener(move |this, _, _, cx| {
-                        this.answer(agent, allow.clone(), true, cx);
-                    }))
-                    .on_deny(cx.listener(move |this, _, _, cx| {
-                        this.answer(agent, deny.clone(), false, cx);
-                    }))
-                    .into_any_element()
-                }
-                Entry::Permission { request, allowed, .. } => ChatNotice::status(match allowed {
-                    Some(true) => trf!("Allowed: {}", "許可済み: {}", request.summary),
-                    _ => trf!("Refused: {}", "拒否: {}", request.summary),
-                })
-                .into_any_element(),
-                Entry::Failed(message) => ChatNotice::error(trf!(
-                    "The turn failed: {message}",
-                    "ターンが失敗しました: {message}"
-                ))
-                .into_any_element(),
-                Entry::Exited(reason) => ChatNotice::status(match reason {
-                    Some(reason) => {
-                        trf!("The agent stopped: {reason}", "エージェントが停止しました: {reason}")
-                    }
-                    None => tr("The agent stopped", "エージェントが停止しました").into(),
-                })
-                .into_any_element(),
-            };
-            rows.push(row);
-        }
-        if view.transcript.busy && matches!(view.transcript.entries.last(), Some(Entry::User(_))) {
-            rows.push(ThinkingIndicator::new(tr("Thinking", "考え中")).into_any_element());
-        }
-        // Sent during the turn; the agent reads them when it ends.
-        for (index, text) in view.transcript.queued.iter().enumerate() {
-            let key: SharedString = format!("{agent}-queued-{index}").into();
-            rows.push(
-                UserMessage::new(text.clone()).id(element("queued", &key)).into_any_element(),
-            );
-        }
-        if !view.transcript.queued.is_empty() {
-            rows.push(
-                ChatNotice::status(tr(
-                    "Sends when the current reply ends",
-                    "現在の返答が終わったら送信します",
-                ))
-                .into_any_element(),
-            );
-        }
-        rows
-    }
-
-    pub(crate) fn commander_panel(
+    /// The workflow on screen, opened beside the conversation or in its place (`full`): a bar
+    /// with its commands, then the canvas and the inspector, side by side when the pane is wide
+    /// enough and stacked when it is not. Beside the conversation the inspector waits for a
+    /// selected step, since the conversation already shows the workflow as a whole.
+    pub(crate) fn workflow_pane(
         &self,
-        width: f32,
+        width: Pixels,
+        full: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let view =
-            self.conversation.and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?)));
-        let (title, status, provider) = match view {
-            Some((_, view)) => (
-                conversation_title(view),
-                agent_status(view.status, !view.transcript.entries.is_empty()),
-                view.spec.model.provider,
-            ),
-            None => (
-                tr("New conversation", "新しい会話").into(),
-                atelier::agent::AgentStatus::Idle,
-                self.provider,
-            ),
-        };
-        let busy = view.is_some_and(|(_, view)| view.transcript.busy);
-        let fresh = view.is_none();
-        let mut panel = AgentPanel::new("commander", title)
-            .status(status)
-            .status_detail(trf!("Commander · {}", "コマンダー · {}", provider.label()))
-            .action(
-                Button::icon_only("panel-new-conversation", IconName::Plus)
-                    .tooltip(tr("New conversation", "新しい会話"))
-                    .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
-            )
-            .on_close(cx.listener(|this, _, _, cx| {
-                this.panel_open = false;
-                cx.notify();
-            }));
-        if let Some((agent, view)) = view {
-            for row in self.entries(agent, view, cx) {
-                panel = panel.entry(row);
-            }
-            let plans = self.mirror.plans.get(&agent).cloned().unwrap_or_default();
-            for workflow in plans {
-                let Some(flow) = self.mirror.workflows.get(&workflow) else { continue };
-                panel = panel.entry(
-                    div().flex().child(
-                        Button::new(
-                            ("open-plan", workflow.0 as usize),
-                            trf!("Open \u{201c}{}\u{201d}", "\u{300c}{}\u{300d}を開く", flow.title),
-                        )
-                        .variant(ButtonVariant::Agent)
-                        .icon(IconName::Sparkles)
-                        .size(ControlSize::Small)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.show_workflow(workflow);
-                            cx.notify();
-                        })),
+        let Some(flow) = self.current() else { return div().into_any_element() };
+        let workflow = flow.id;
+        let progress = Progress::of(flow);
+        let beside = width >= theme.density.split_width;
+        let inspector_width = if beside { px(INSPECTOR_WIDTH) } else { width };
+        let inspect = full || self.selected.is_some();
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme.spacing.sm)
+            .h(theme.density.toolbar)
+            .px(theme.spacing.md)
+            .border_b_1()
+            .border_color(theme.colors.border)
+            .bg(theme.colors.chrome)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        Label::new(flow.title.clone())
+                            .weight(theme.typography.label_weight)
+                            .truncate(),
+                    )
+                    .child(
+                        Label::new(trf!(
+                            "{} of {} steps done",
+                            "{} / {} ステップ完了",
+                            progress.done,
+                            progress.total
+                        ))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Muted)
+                        .truncate(),
                     ),
-                );
-            }
-        }
-        panel = panel.empty_state(
-            div()
-                .flex()
-                .flex_col()
-                .gap(theme.spacing.md)
-                .child(SectionHeader::new(tr("What should be built?", "何を作りますか？")).description(tr(
-                    "The commander reads the repository, talks the plan through with you, and \
-                     writes it as a workflow. It never changes files itself.",
-                    "コマンダーはリポジトリを読み、あなたと計画を話し合ってワークフローとして\
-                     書き出します。ファイルを自分で変更することはありません。",
-                )))
-                .when(self.project.repository.is_none(), |empty| {
-                    empty.child(self.project_fields(cx))
-                }),
-        );
-        let composer = Composer::new("commander-composer")
-            .input({
-                let this = cx.entity().downgrade();
-                input::message(&self.fields.composer, move |window, cx| {
-                    this.update(cx, |this, cx| this.send_to_commander(window, cx)).ok();
-                })
+            )
+            .when(progress.waiting > 0, |bar| {
+                bar.child(
+                    Badge::new(trf!("{} waiting for you", "{} 件があなた待ち", progress.waiting))
+                        .tone(Tone::Warning)
+                        .icon(IconName::Alert),
+                )
             })
-            .model(provider.label())
-            .busy(busy)
-            .on_send(cx.listener(|this, _, window, cx| this.send_to_commander(window, cx)))
-            .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
-            .when(fresh, |composer| {
-                // The provider is fixed once the conversation starts.
-                composer.on_model(cx.listener(|this, _, _, cx| {
-                    let index = ProviderKind::ALL.iter().position(|kind| *kind == this.provider);
-                    this.provider =
-                        ProviderKind::ALL[(index.unwrap_or(0) + 1) % ProviderKind::ALL.len()];
-                    cx.notify();
-                }))
-            });
+            .when(progress.failed > 0, |bar| {
+                bar.child(
+                    Badge::new(trf!("{} failed", "{} 件失敗", progress.failed))
+                        .tone(Tone::Danger)
+                        .icon(IconName::Alert),
+                )
+            })
+            .child(if progress.finished {
+                Button::new("publish", tr("Open pull request", "プルリクエストを作成"))
+                    .primary()
+                    .icon(IconName::ArrowUp)
+                    .size(ControlSize::Small)
+                    .on_click(cx.listener(move |this, _, _, cx| this.publish(workflow, cx)))
+            } else {
+                Button::new("run", tr("Run", "実行"))
+                    .primary()
+                    .icon(IconName::Play)
+                    .size(ControlSize::Small)
+                    .disabled(!progress.ready)
+                    .on_click(cx.listener(move |this, _, _, cx| this.run(workflow, cx)))
+            })
+            .when(self.chat_fits_beside(), |bar| {
+                bar.child(
+                    Button::icon_only(
+                        "expand-workflow",
+                        if self.workflow_full {
+                            IconName::WindowRestore
+                        } else {
+                            IconName::WindowMaximize
+                        },
+                    )
+                    .tooltip(if self.workflow_full {
+                        tr("Show the conversation beside it", "会話を横に表示")
+                    } else {
+                        tr("Fill the window", "ウィンドウ全体に広げる")
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workflow_full = !this.workflow_full;
+                        cx.notify();
+                    })),
+                )
+            })
+            .child(
+                Button::icon_only("close-workflow", IconName::Close)
+                    .tooltip(tr("Back to the conversation", "会話に戻る"))
+                    .on_click(cx.listener(|this, _, _, cx| this.close_workflow(cx))),
+            );
         div()
-            .w(px(width))
+            .flex()
+            .flex_col()
+            .w(width)
             .flex_none()
             .h_full()
+            .min_h_0()
             .border_l_1()
             .border_color(theme.colors.border)
+            .child(header)
             .child(
-                panel
-                    .composer(input::stretch(px(width) - theme.spacing.sm * 2. - px(1.), composer)),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .when(!beside, |body| body.flex_col())
+                    .child(self.graph(cx))
+                    .when(inspect, |body| body.child(self.inspector(beside, inspector_width, cx))),
             )
+            .into_any_element()
     }
 
-    pub(crate) fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The selected node, its worker, or the workflow as a whole: a column on the trailing
+    /// edge of the canvas when `beside`, otherwise a band under it.
+    fn inspector(
+        &self,
+        beside: bool,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let node = self.selected.and_then(|id| self.current()?.node(id)).cloned();
         let worker = node
@@ -621,39 +385,48 @@ impl Maestro {
         let content = match &node {
             Some(node) if self.node_tab == 1 && worker.is_some() => {
                 let (agent, view) = worker.clone().expect("checked above");
-                self.worker(node.id, agent, &view, cx).into_any_element()
+                self.worker(agent, &view, width, cx).into_any_element()
             }
             Some(node) => self.node_details(node, cx).into_any_element(),
             None => self.overview(cx).into_any_element(),
         };
-        Sidebar::new(Edge::Right)
-            .w(px(INSPECTOR_WIDTH))
-            .when(worker.is_some(), |side| {
-                side.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .h(theme.density.toolbar)
-                        .px(theme.spacing.sm)
-                        .border_b_1()
-                        .border_color(theme.colors.border)
-                        .child(
-                            Tabs::new(
-                                "node-tabs",
-                                [tr("Details", "詳細"), tr("Worker", "ワーカー")],
-                                self.node_tab,
-                            )
-                            .on_select(cx.listener(
-                                |this, index: &usize, _, cx| {
-                                    this.node_tab = *index;
-                                    cx.notify();
-                                },
-                            )),
-                        ),
+        let tabs = worker.is_some().then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(theme.density.toolbar)
+                .px(theme.spacing.sm)
+                .border_b_1()
+                .border_color(theme.colors.border)
+                .child(
+                    Tabs::new(
+                        "node-tabs",
+                        [tr("Details", "詳細"), tr("Worker", "ワーカー")],
+                        self.node_tab,
+                    )
+                    .on_select(cx.listener(|this, index: &usize, _, cx| {
+                        this.node_tab = *index;
+                        cx.notify();
+                    })),
                 )
-            })
-            .child(content)
+        });
+        if beside {
+            Sidebar::new(Edge::Right).w(width).children(tabs).child(content).into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w_full()
+                .h(px(INSPECTOR_HEIGHT))
+                .bg(theme.colors.surface)
+                .border_t_1()
+                .border_color(theme.colors.border)
+                .children(tabs)
+                .child(content)
+                .into_any_element()
+        }
     }
 
     fn node_details(
@@ -879,15 +652,15 @@ impl Maestro {
 
     fn worker(
         &self,
-        node: NodeId,
         agent: AgentId,
         view: &AgentView,
+        width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let rows = self.entries(agent, view, cx);
         let busy = view.transcript.busy;
-        let _ = node;
+        let provider = view.spec.model.provider;
         div()
             .flex()
             .flex_col()
@@ -907,7 +680,7 @@ impl Maestro {
             )
             .child(
                 div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(input::stretch(
-                    px(INSPECTOR_WIDTH) - theme.spacing.sm * 2.,
+                    width - theme.spacing.sm * 2.,
                     Composer::new("worker-composer")
                         .input({
                             let this = cx.entity().downgrade();
@@ -915,12 +688,11 @@ impl Maestro {
                                 this.update(cx, |this, cx| this.send_to_node(window, cx)).ok();
                             })
                         })
-                        .model(trf!(
-                            "{} · worker",
-                            "{} · ワーカー",
-                            view.spec.model.provider.label()
-                        ))
+                        .model(trf!("{} · worker", "{} · ワーカー", provider.label()))
+                        .when_some(provider_logo(provider), Composer::model_logo)
                         .busy(busy)
+                        // The daemon holds a message sent mid-turn until the turn ends.
+                        .queue(true)
                         .on_send(cx.listener(|this, _, window, cx| this.send_to_node(window, cx)))
                         .on_stop(cx.listener(move |this, _, _, cx| this.interrupt(agent, cx))),
                 )),

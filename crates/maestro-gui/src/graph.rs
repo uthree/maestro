@@ -419,7 +419,6 @@ impl Maestro {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.select(Some(id));
-                    this.panel_open = false;
                     this.canvas.drag = Drag::Node(id, event.position);
                     cx.stop_propagation();
                     cx.notify();
@@ -606,7 +605,7 @@ impl Maestro {
             .relative()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .overflow_hidden()
             .bg(theme.colors.background)
             .on_mouse_down(
@@ -653,12 +652,9 @@ impl Maestro {
                                     )
                                     .variant(ButtonVariant::Agent)
                                     .icon(IconName::Sparkles)
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.panel_open = true;
-                                            cx.notify();
-                                        },
-                                    )),
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.close_workflow(cx)),
+                                    ),
                                 ),
                         ),
                     ),

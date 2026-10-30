@@ -15,6 +15,7 @@
 //! language.
 
 mod app;
+mod chat;
 mod graph;
 mod i18n;
 mod input;
@@ -90,6 +91,10 @@ fn main() -> ExitCode {
         let theme = Theme::new(direction, appearance);
         let background = theme.window_background();
         atelier::init(cx, theme);
+        // The words Atelier's components draw themselves: tooltips, Send, Allow, states.
+        if i18n::lang() == i18n::Lang::Ja {
+            atelier::Strings::japanese().install(cx);
+        }
         gpui_component::init(cx);
         input::follow_theme(cx);
         input::bind_keys(cx);
