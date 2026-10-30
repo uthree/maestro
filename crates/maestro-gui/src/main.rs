@@ -15,8 +15,9 @@
 //! The window opens a project: the one with that repository among its folders, made if there is
 //! none, or else the newest.
 //!
-//! The window speaks English or Japanese: `--lang`, else `MAESTRO_LANG`, else the system's
-//! language.
+//! The window speaks English or Japanese: `--lang`, else the language picked in Settings, else
+//! `MAESTRO_LANG`, else the system's language. `--appearance` and `--direction` likewise win over
+//! the look picked in Settings for one run.
 
 mod app;
 mod chat;
@@ -25,16 +26,19 @@ mod i18n;
 mod input;
 mod link;
 mod panels;
+mod prefs;
 mod project;
+mod settings;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use atelier::{Appearance, Assets, Direction, Theme};
+use atelier::{ActiveTheme, Appearance, Assets, Direction, Theme};
 use gpui::{
-    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
 };
 use maestro_client::Launch;
+use prefs::Preferences;
 
 use crate::app::{Maestro, Start};
 
@@ -83,7 +87,10 @@ fn main() -> ExitCode {
         return maestro_daemon::resident::run(&args);
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    if let Some(lang) = argument("--lang").and_then(|tag| i18n::Lang::from_tag(&tag)) {
+    let saved = Preferences::load();
+    if let Some(lang) =
+        argument("--lang").and_then(|tag| i18n::Lang::from_tag(&tag)).or(saved.lang())
+    {
         i18n::set(lang);
     }
     let launch = launch();
@@ -92,17 +99,18 @@ fn main() -> ExitCode {
         .map(PathBuf::from)
         .or_else(|| (!matches!(launch, Launch::Ssh { .. })).then(checkout_here).flatten());
     let start = Start::new(repository, argument("--base").unwrap_or_else(|| "main".into()));
-    let direction =
-        argument("--direction").and_then(|id| Direction::from_id(&id)).unwrap_or_default();
+    let direction = argument("--direction")
+        .and_then(|id| Direction::from_id(&id))
+        .or(saved.direction())
+        .unwrap_or_default();
     let appearance = match argument("--appearance").as_deref() {
         Some("light") => Appearance::Light,
-        _ => Appearance::Dark,
+        Some("dark") => Appearance::Dark,
+        _ => saved.appearance().unwrap_or(Appearance::Dark),
     };
 
     Application::new().with_assets(Assets::default()).run(move |cx: &mut App| {
-        let theme = Theme::new(direction, appearance);
-        let background = theme.window_background();
-        atelier::init(cx, theme);
+        atelier::init(cx, Theme::new(direction, appearance));
         // The words Atelier's components draw themselves: tooltips, Send, Allow, states.
         if i18n::lang() == i18n::Lang::Ja {
             atelier::Strings::japanese().install(cx);
@@ -111,20 +119,7 @@ fn main() -> ExitCode {
         input::follow_theme(cx);
         input::bind_keys(cx);
 
-        let bounds = Bounds::centered(None, size(px(1600.), px(1000.)), cx);
-        let options = atelier::custom_frame(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
-                window_background: background,
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Maestro".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            &Theme::new(direction, appearance),
-        );
+        let options = window_options("Maestro", (1600., 1000.), MIN_SIZE, cx);
         cx.open_window(options, |window, cx| {
             atelier::set_window_background(window, &Theme::new(direction, appearance));
             let view = cx.new(|cx| Maestro::new(launch, start, window, cx));
@@ -137,4 +132,25 @@ fn main() -> ExitCode {
         cx.activate(true);
     });
     ExitCode::SUCCESS
+}
+
+/// A window in Atelier's frame, centred, `size` big and never smaller than `min`.
+pub(crate) fn window_options(
+    title: &'static str,
+    size: (f32, f32),
+    min: (f32, f32),
+    cx: &mut App,
+) -> WindowOptions {
+    let theme = cx.theme().clone();
+    let bounds = Bounds::centered(None, gpui::size(px(size.0), px(size.1)), cx);
+    atelier::custom_frame(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(gpui::size(px(min.0), px(min.1))),
+            window_background: theme.window_background(),
+            titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
+            ..Default::default()
+        },
+        &theme,
+    )
 }

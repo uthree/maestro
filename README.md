@@ -49,6 +49,19 @@ dependencies). Select a step to see its worker, answer its permission requests, 
 changes. When every step
 has succeeded, "Open pull request" merges them and opens one pull request.
 
+The gear in the title bar opens Settings:
+
+* **General**: the display language (System, English, 日本語) and the theme. These are saved on
+  this computer in `~/.maestro/preferences.json` and apply at once. `--lang`, `--appearance` and
+  `--direction` override them for one run.
+* **Agent providers**: which of Claude Code, Codex, Antigravity CLI and OpenCode the daemon's
+  machine has, and which release. Install or update one with its project's own script (shown
+  before it runs), and follow the output as it goes. A switch takes a provider out of routing
+  without uninstalling it. Each CLI signs in to your account in a terminal, so Settings shows the
+  command to run instead.
+* **Work allocation**: when a step runs on several models to compare them, and the worker limits
+  that stand for compute and usage. These are saved to the daemon's `router.json`.
+
 `--appearance light` and `--direction studio|mono` change the theme. On Linux, building needs
 the X11, Wayland and Vulkan headers (`libxkbcommon-x11-dev libwayland-dev libvulkan-dev
 libxcb1-dev libx11-xcb-dev` on Debian and Ubuntu), and the window needs a window manager or

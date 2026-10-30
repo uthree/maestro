@@ -14,8 +14,8 @@ use std::io::{self, BufRead, Write};
 
 use maestro_core::{
     AgentEvent, AgentId, AgentSpec, Choice, Difficulty, Host, ModelChoice, NodeDraft, NodeEdit,
-    NodeId, NodeRef, Project, ProjectId, Resource, ResourceId, Workflow, WorkflowId,
-    WorkflowTarget, Workspace,
+    NodeId, NodeRef, Project, ProjectId, ProviderKind, ProviderStatus, Resource, ResourceId,
+    Router, SetupAction, Workflow, WorkflowId, WorkflowTarget, Workspace,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -231,6 +231,31 @@ pub enum Command {
         #[serde(default)]
         project: Option<ProjectId>,
     },
+    /// Fetches the router's settings: its catalog, its weights, when nodes are compared, and the
+    /// providers switched off.
+    GetRouter,
+    /// Replaces the router's settings and saves them to the daemon's `router.json`. Every
+    /// frontend gets [`Event::RouterChanged`]. Work already running keeps its model.
+    SetRouter {
+        /// The new settings.
+        router: Router,
+    },
+    /// Looks for each provider's CLI on a host, and asks the ones found for their version.
+    ListProviders {
+        /// The host to look on.
+        host: Host,
+    },
+    /// Installs or updates a provider's CLI on a host with the script its project documents
+    /// ([`ProviderKind::setup_script`]). Answered at once; the script's output and its end
+    /// arrive as [`Event::ProviderSetup`], so every frontend can follow it.
+    SetupProvider {
+        /// The host to run it on.
+        host: Host,
+        /// Which CLI.
+        provider: ProviderKind,
+        /// Install, or update.
+        action: SetupAction,
+    },
     /// Merges every node's branch into one branch, pushes it, and opens a pull request.
     PublishWorkflow {
         /// Which workflow; every node must have succeeded.
@@ -419,6 +444,16 @@ pub enum Reply {
         /// The events.
         events: Vec<AgentEvent>,
     },
+    /// The router's settings.
+    Router {
+        /// As `router.json` holds them.
+        router: Router,
+    },
+    /// Each provider's CLI on a host, in [`ProviderKind::ALL`]'s order.
+    Providers {
+        /// One each.
+        providers: Vec<ProviderStatus>,
+    },
     /// The router's choice, or `None` when no catalog model is installed on the host.
     ModelChosen {
         /// The choice, with its score and how much record informed it.
@@ -536,6 +571,20 @@ pub enum Event {
         /// The new workflow.
         workflow: WorkflowId,
     },
+    /// The router's settings were replaced.
+    RouterChanged {
+        /// The settings as they now are.
+        router: Router,
+    },
+    /// An install or update of a provider's CLI moved on.
+    ProviderSetup {
+        /// Where it runs.
+        host: Host,
+        /// Which CLI.
+        provider: ProviderKind,
+        /// What happened.
+        progress: SetupProgress,
+    },
     /// An agent was started; its events follow.
     AgentStarted {
         /// The agent.
@@ -547,6 +596,31 @@ pub enum Event {
         agent: AgentId,
         /// What it did.
         event: AgentEvent,
+    },
+}
+
+/// How an install or update of a provider's CLI is going.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "step")]
+pub enum SetupProgress {
+    /// The script started.
+    Started {
+        /// Install, or update.
+        action: SetupAction,
+        /// The script, as run by `sh -c`.
+        script: String,
+    },
+    /// A line it wrote, on standard output or standard error.
+    Output {
+        /// The line, without its newline.
+        line: String,
+    },
+    /// It ended.
+    Finished {
+        /// Whether it exited successfully.
+        ok: bool,
+        /// The CLI as found afterwards.
+        status: ProviderStatus,
     },
 }
 

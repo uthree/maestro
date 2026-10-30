@@ -20,7 +20,7 @@
 //! [`Router::choose`] and [`Router::lineup`] are pure functions of the catalog, the record and
 //! the task, so a choice can be explained and tested.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -229,9 +229,17 @@ pub struct Router {
     /// When a node runs on several models at once.
     #[serde(default)]
     pub comparison: Comparison,
+    /// Providers the user has switched off: no work is routed to them even when installed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled: BTreeSet<ProviderKind>,
 }
 
 impl Router {
+    /// The providers of `installed` the user has not switched off.
+    pub fn usable(&self, installed: &[ProviderKind]) -> Vec<ProviderKind> {
+        installed.iter().copied().filter(|provider| !self.disabled.contains(provider)).collect()
+    }
+
     /// The best model for a node of `difficulty` and `tags`, among providers `available` on the
     /// host.
     ///
@@ -427,6 +435,7 @@ mod tests {
             },
             weights: Weights::default(),
             comparison: Comparison::default(),
+            disabled: Default::default(),
         }
     }
 

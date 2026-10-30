@@ -125,4 +125,13 @@ ChatGPT のデスクトップアプリのように、作業環境を「プロジ
   フォルダボタンで、会話の横にプロジェクトのリソース（名前、リポジトリ・フォルダ・SSH 接続先、AI
   プロバイダのオン・オフ、削除）を開きます。`--repo` を指定すると、そのフォルダを持つプロジェクトを開き、
   なければ作ります。
+- **設定ウィンドウ**: タイトルバーの歯車から開く別ウィンドウで、Atelier の preferences の形（サイドバーの
+  ページ、`density.form_width` の列、ステータスバー）に従います。
+  - 一般: 表示言語と外観。GUI を動かしている PC の `~/.maestro/preferences.json` に保存し、すぐ反映します。
+  - AI エージェント: デーモンのマシンにある CLI とそのバージョン（`Command::ListProviders`）。インストールと
+    更新は各プロジェクトが公開しているスクリプトをデーモンが `sh -c` で実行し、出力を
+    `Event::ProviderSetup` で全フロントエンドに流します（`Command::SetupProvider`）。プロバイダの利用停止は
+    `router.json` の `disabled` に入り、ルーターの候補から外れます。サインインは各 CLI が対話的に行うので、
+    実行するコマンドを表示するだけにしています。
+  - 作業の割り当て: `router.json` の `comparison` を `Command::SetRouter` で書き換えます。
 - TUI（ratatui）は、この後に同じ `maestro-client` の上に作ります。

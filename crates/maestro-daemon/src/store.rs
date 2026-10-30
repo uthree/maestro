@@ -51,6 +51,16 @@ impl Store {
         self.home.as_deref()
     }
 
+    /// Replaces the router's settings and writes them to `router.json`, keeping the old ones
+    /// if they cannot be saved.
+    pub(crate) fn set_router(&mut self, router: Router) -> io::Result<()> {
+        if let Some(home) = &self.home {
+            write(&home.join("router.json"), &router)?;
+        }
+        self.router = router;
+        Ok(())
+    }
+
     /// Every outcome on record.
     pub(crate) fn outcomes(&self) -> Vec<Outcome> {
         self.outcomes.values().cloned().collect()

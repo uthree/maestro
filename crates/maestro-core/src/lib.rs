@@ -25,7 +25,7 @@ pub use plan::{
     COMMANDER_INSTRUCTIONS, Plan, PlanError, PlanNode, WORKER_INSTRUCTIONS, status_report,
 };
 pub use project::{Checkout, Placement, Project, ProjectError, ProjectResource, Resource};
-pub use provider::{Effort, ModelChoice, ModelGrade, ProviderKind};
+pub use provider::{Effort, ModelChoice, ModelGrade, ProviderKind, ProviderStatus, SetupAction};
 pub use routing::{
     Catalog, Choice, Comparison, Difficulty, ModelKey, ModelProfile, Outcome, Router, Weights,
 };

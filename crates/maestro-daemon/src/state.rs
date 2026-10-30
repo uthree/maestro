@@ -212,8 +212,12 @@ impl State {
             | Command::ChooseContender { .. }
             | Command::StartCommander { .. }
             | Command::ChooseModel { .. }
+            | Command::GetRouter
+            | Command::SetRouter { .. }
+            | Command::ListProviders { .. }
+            | Command::SetupProvider { .. }
             | Command::PublishWorkflow { .. } => {
-                unreachable!("the hub sends these to the runtime or the engine")
+                unreachable!("the hub sends these to the runtime, the engine or the providers")
             }
         })
     }
