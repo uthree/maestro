@@ -131,6 +131,10 @@ impl Hub {
         let runtime = Runtime::new(Arc::new(move |event| {
             broadcast(&mut shared.lock().expect("hub lock"), &event);
         }));
+        let shared = Arc::clone(&inner);
+        runtime.brief_with(Box::new(move || {
+            maestro_core::status_report(&shared.lock().expect("hub lock").state.workflows())
+        }));
         let engine = engine::spawn(Arc::clone(&inner), Arc::clone(&runtime), store);
         Self { inner, runtime, engine }
     }

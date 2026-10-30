@@ -22,7 +22,8 @@ use maestro_client::mirror::Notice;
 use maestro_client::{Client, Launch, Mirror};
 use maestro_core::{
     AgentId, AgentRole, Difficulty, Effort, Host, ModelChoice, ModelGrade, NodeDraft, NodeEdit,
-    NodeId, NodeOrigin, NodeStatus, ProviderKind, Workflow, WorkflowId, WorkflowTarget, Workspace,
+    NodeId, NodeOrigin, NodeRef, NodeStatus, ProviderKind, Workflow, WorkflowId, WorkflowTarget,
+    Workspace,
 };
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
@@ -477,6 +478,12 @@ impl Maestro {
     pub(crate) fn disconnect_nodes(&mut self, from: NodeId, to: NodeId, cx: &mut Context<Self>) {
         let Some(workflow) = self.workflow else { return };
         self.command(Command::RemoveEdge { workflow, from, to }, cx);
+    }
+
+    /// Stops a node waiting for a node of an earlier workflow.
+    pub(crate) fn stop_waiting(&mut self, node: NodeId, on: NodeRef, cx: &mut Context<Self>) {
+        let Some(workflow) = self.workflow else { return };
+        self.command(Command::StopWaiting { workflow, node, on }, cx);
     }
 
     pub(crate) fn edit_node(&mut self, node: NodeId, edit: NodeEdit, cx: &mut Context<Self>) {

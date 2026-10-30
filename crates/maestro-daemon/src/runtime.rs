@@ -3,8 +3,11 @@
 //! These run on their own thread per request, because over SSH a `git push` or a CLI start takes
 //! seconds, and the connection that asked must stay free to send other requests meanwhile. No
 //! lock is held while a process runs.
+//!
+//! A message sent to an agent in the middle of a turn waits here until the turn ends, so the user
+//! can keep writing while an agent works, and every CLI still gets one message per turn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -19,6 +22,8 @@ use maestro_protocol::{
 
 pub(crate) type Broadcast = Arc<dyn Fn(Event) + Send + Sync>;
 pub(crate) type Listener = Box<dyn Fn(AgentId, AgentEvent) + Send + Sync>;
+/// What a commander reads ahead of the user's message about the work under way, if any.
+pub(crate) type Briefing = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 struct Agent {
     spec: AgentSpec,
@@ -26,6 +31,10 @@ struct Agent {
     session: Option<AgentSession>,
     /// Every event so far, for frontends that connect later.
     transcript: Vec<AgentEvent>,
+    /// Messages sent during the current turn, for the turns after it.
+    queued: VecDeque<String>,
+    /// The briefing a commander last read, so that it reads one only when the work changed.
+    briefed: Option<String>,
 }
 
 pub(crate) struct Runtime {
@@ -34,6 +43,7 @@ pub(crate) struct Runtime {
     broadcast: Broadcast,
     /// Also told every event: the workflow engine, which moves nodes along as workers finish.
     listener: OnceLock<Listener>,
+    briefing: OnceLock<Briefing>,
     this: Weak<Runtime>,
 }
 
@@ -44,6 +54,7 @@ impl Runtime {
             next_agent: AtomicU64::new(1),
             broadcast,
             listener: OnceLock::new(),
+            briefing: OnceLock::new(),
             this: this.clone(),
         })
     }
@@ -53,7 +64,14 @@ impl Runtime {
         let mut agents = self.agents.lock().expect("agents lock");
         for SavedAgent { id, spec, transcript } in saved {
             self.next_agent.fetch_max(id.0 + 1, Ordering::Relaxed);
-            let agent = Agent { spec, status: AgentStatus::Exited, session: None, transcript };
+            let agent = Agent {
+                spec,
+                status: AgentStatus::Exited,
+                session: None,
+                transcript,
+                queued: VecDeque::new(),
+                briefed: None,
+            };
             agents.insert(id, agent);
         }
     }
@@ -92,6 +110,12 @@ impl Runtime {
     /// Sends every later agent event to `listener` too.
     pub(crate) fn listen(&self, listener: Listener) {
         self.listener.set(listener).ok();
+    }
+
+    /// Puts what `briefing` returns ahead of each message to a commander, when it has changed
+    /// since the commander last read it.
+    pub(crate) fn brief_with(&self, briefing: Briefing) {
+        self.briefing.set(briefing).ok();
     }
 
     /// Whether `command` belongs here rather than to the workflow state.
@@ -134,12 +158,18 @@ impl Runtime {
                 Ok(Reply::Transcript { events: entry.transcript.clone() })
             }
             Command::SendToAgent { agent, text } => {
-                if !self.agents.lock().expect("agents lock").contains_key(&agent) {
-                    return Err(CommandError::UnknownAgent { agent });
+                let mut agents = self.agents.lock().expect("agents lock");
+                let entry = agents.get_mut(&agent).ok_or(CommandError::UnknownAgent { agent })?;
+                let in_turn =
+                    matches!(entry.status, AgentStatus::Working | AgentStatus::AwaitingPermission);
+                if in_turn && entry.session.is_some() {
+                    entry.queued.push_back(text.clone());
+                    drop(agents);
+                    self.observe(agent, AgentEvent::Queued { text });
+                    return Ok(Reply::Done);
                 }
-                // Reported before it is sent, so that it precedes the reply in every transcript.
-                self.observe(agent, AgentEvent::Prompted { text: text.clone() });
-                self.with_session(agent, Some(AgentStatus::Working), |session| session.send(text))
+                drop(agents);
+                self.deliver(agent, text)
             }
             Command::AnswerPermission { agent, request, allow } => {
                 self.with_session(agent, Some(AgentStatus::Working), |session| {
@@ -197,6 +227,8 @@ impl Runtime {
                 status: AgentStatus::Working,
                 session: None,
                 transcript: Vec::new(),
+                queued: VecDeque::new(),
+                briefed: None,
             },
         );
         let summary = AgentSummary { id: agent, spec: spec.clone(), status: AgentStatus::Working };
@@ -213,11 +245,12 @@ impl Runtime {
             program: None,
             read_only: spec.role == AgentRole::Commander,
         };
+        let message = self.briefed(agent, prompt);
         let this = self.this.clone();
         let spawned = AgentSession::spawn(
             &spec.workspace.host,
             maestro_agents::adapter(config),
-            prompt,
+            &message,
             move |event| {
                 if let Some(runtime) = this.upgrade() {
                     runtime.observe(agent, event);
@@ -239,6 +272,39 @@ impl Runtime {
         }
     }
 
+    /// Sends a message to an agent between turns.
+    fn deliver(&self, agent: AgentId, text: String) -> Result<Reply, CommandError> {
+        // Reported before it is sent, so that it precedes the reply in every transcript.
+        self.observe(agent, AgentEvent::Prompted { text: text.clone() });
+        let message = self.briefed(agent, &text);
+        self.with_session(agent, Some(AgentStatus::Working), |session| session.send(message))
+    }
+
+    /// `text` as a commander should read it: after the briefing, if that changed since the
+    /// commander last read it. Takes the hub's lock, so call it holding no other.
+    fn briefed(&self, agent: AgentId, text: &str) -> String {
+        let Some(briefing) = self.briefing.get() else { return text.into() };
+        let commander = self
+            .agents
+            .lock()
+            .expect("agents lock")
+            .get(&agent)
+            .map(|entry| entry.spec.role == AgentRole::Commander);
+        if commander != Some(true) {
+            return text.into();
+        }
+        let report = briefing();
+        let mut agents = self.agents.lock().expect("agents lock");
+        let Some(entry) = agents.get_mut(&agent) else { return text.into() };
+        match report {
+            Some(report) if entry.briefed.as_ref() != Some(&report) => {
+                entry.briefed = Some(report.clone());
+                format!("{report}\n\n{text}")
+            }
+            _ => text.into(),
+        }
+    }
+
     fn observe(&self, agent: AgentId, event: AgentEvent) {
         let status = match &event {
             AgentEvent::PermissionRequested { .. } => Some(AgentStatus::AwaitingPermission),
@@ -248,9 +314,15 @@ impl Runtime {
             AgentEvent::Exited { .. } => Some(AgentStatus::Exited),
             _ => None,
         };
+        let mut next = None;
         if let Some(entry) = self.agents.lock().expect("agents lock").get_mut(&agent) {
             if let Some(status) = status {
                 entry.status = status;
+            }
+            match status {
+                Some(AgentStatus::Idle) => next = entry.queued.pop_front(),
+                Some(AgentStatus::Exited) => entry.queued.clear(),
+                _ => {}
             }
             remember(&mut entry.transcript, &event);
             // The commander plans; it never changes anything, whatever it asks.
@@ -266,6 +338,9 @@ impl Runtime {
             listener(agent, event.clone());
         }
         (self.broadcast)(Event::Agent { agent, event });
+        if let Some(text) = next {
+            self.deliver(agent, text).ok();
+        }
     }
 
     /// Acts on a running agent's session, first recording the status the action leads to.
