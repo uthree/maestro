@@ -22,8 +22,9 @@ use maestro_protocol::{
 
 pub(crate) type Broadcast = Arc<dyn Fn(Event) + Send + Sync>;
 pub(crate) type Listener = Box<dyn Fn(AgentId, AgentEvent) + Send + Sync>;
-/// What a commander reads ahead of the user's message about the work under way, if any.
-pub(crate) type Briefing = Box<dyn Fn() -> Option<String> + Send + Sync>;
+/// What a commander reads ahead of the user's message about its project and the work under way,
+/// if anything.
+pub(crate) type Briefing = Box<dyn Fn(&AgentSpec) -> Option<String> + Send + Sync>;
 
 struct Agent {
     spec: AgentSpec,
@@ -284,16 +285,15 @@ impl Runtime {
     /// commander last read it. Takes the hub's lock, so call it holding no other.
     fn briefed(&self, agent: AgentId, text: &str) -> String {
         let Some(briefing) = self.briefing.get() else { return text.into() };
-        let commander = self
+        let spec = self
             .agents
             .lock()
             .expect("agents lock")
             .get(&agent)
-            .map(|entry| entry.spec.role == AgentRole::Commander);
-        if commander != Some(true) {
-            return text.into();
-        }
-        let report = briefing();
+            .map(|entry| entry.spec.clone())
+            .filter(|spec| spec.role == AgentRole::Commander);
+        let Some(spec) = spec else { return text.into() };
+        let report = briefing(&spec);
         let mut agents = self.agents.lock().expect("agents lock");
         let Some(entry) = agents.get_mut(&agent) else { return text.into() };
         match report {

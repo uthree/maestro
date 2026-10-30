@@ -17,7 +17,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::id::{AgentId, NodeId, WorkflowId};
+use crate::id::{AgentId, NodeId, ProjectId, WorkflowId};
 use crate::provider::ModelChoice;
 use crate::routing::Difficulty;
 use crate::target::Host;
@@ -182,6 +182,16 @@ pub struct WorkflowTarget {
     pub publish: bool,
 }
 
+impl WorkflowTarget {
+    /// Work in `repository` from `base`, with the worktrees in a directory beside the checkout
+    /// so they never show up in it as untracked files.
+    pub fn beside(host: Host, repository: PathBuf, base: impl Into<String>) -> Self {
+        let mut worktrees = repository.clone().into_os_string();
+        worktrees.push("-worktrees");
+        Self { host, repository, base: base.into(), worktrees: worktrees.into(), publish: false }
+    }
+}
+
 /// `to` depends on `from`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Edge {
@@ -237,6 +247,8 @@ pub struct Workflow {
     pub target: Option<WorkflowTarget>,
     /// The commander whose plan it came from, if one wrote it.
     pub planned_by: Option<AgentId>,
+    /// The project it belongs to, whose resources it runs with.
+    pub project: Option<ProjectId>,
     /// Whether it has been set going: its nodes then start by themselves as soon as what they
     /// wait for has succeeded, including nodes of other workflows.
     pub started: bool,
@@ -256,6 +268,9 @@ struct WorkflowRepr {
     target: Option<WorkflowTarget>,
     #[serde(default)]
     planned_by: Option<AgentId>,
+    // A state.json saved before projects has none.
+    #[serde(default)]
+    project: Option<ProjectId>,
     // A state.json saved before workflows could be started has none.
     #[serde(default)]
     started: bool,
@@ -271,6 +286,7 @@ impl From<WorkflowRepr> for Workflow {
             title: repr.title,
             target: repr.target,
             planned_by: repr.planned_by,
+            project: repr.project,
             started: repr.started,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
@@ -286,6 +302,7 @@ impl From<Workflow> for WorkflowRepr {
             title: flow.title,
             target: flow.target,
             planned_by: flow.planned_by,
+            project: flow.project,
             started: flow.started,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
@@ -302,6 +319,7 @@ impl Workflow {
             title: title.into(),
             target: None,
             planned_by: None,
+            project: None,
             started: false,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),

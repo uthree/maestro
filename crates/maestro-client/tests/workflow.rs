@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use maestro_client::{Client, Launch};
 use maestro_core::{
-    AgentEvent, Effort, Host, ModelChoice, ModelGrade, NodeId, NodeStatus, ProviderKind, Workflow,
-    WorkflowTarget, Workspace,
+    AgentEvent, Effort, Host, ModelChoice, ModelGrade, NodeId, NodeStatus, ProjectId, ProviderKind,
+    Resource, Workflow,
 };
 use maestro_daemon::Hub;
 use maestro_protocol::{Command, Event, Reply};
@@ -91,7 +91,7 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     // one needs nothing.
     let more = serde_json::json!({
         "type": "result", "subtype": "success", "is_error": false,
-        "result": "Queued:\n```maestro-plan\n{\"title\": \"Follow-up\", \"nodes\": [
+        "result": "Queued:\n```maestro-plan\n{\"title\": \"Follow-up\", \"resource\": \"r1\", \"nodes\": [
             {\"key\": \"c\", \"title\": \"Third\", \"instructions\": \"Do c\", \"after\": [\"wf1/n2\"]},
             {\"key\": \"d\", \"title\": \"Aside\", \"instructions\": \"Do d\"}
         ]}\n```"
@@ -113,17 +113,36 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     git(repository.path(), &["config", "user.name", "T"]);
     git(repository.path(), &["config", "user.email", "t@e"]);
     git(repository.path(), &["commit", "--quiet", "--allow-empty", "-m", "root"]);
-    let trees = tempfile::tempdir().unwrap();
-    let target = WorkflowTarget {
-        host: Host::Local,
-        repository: repository.path().into(),
-        base: "main".into(),
-        worktrees: trees.path().into(),
-        publish: false,
-    };
+    // The project's worktrees go beside its folder.
+    let trees = std::path::PathBuf::from(format!("{}-worktrees", repository.path().display()));
 
     let client = Client::connect(&Launch::InProcess(Hub::new())).unwrap();
     let events = client.take_events().unwrap();
+
+    // A project with the repository, whose workers may run only on Claude Code.
+    let folder = Resource::Directory {
+        host: Host::Local,
+        path: repository.path().into(),
+        base: "main".into(),
+    };
+    let created = client.request(Command::CreateProject {
+        name: "Site".into(),
+        resources: vec![folder, Resource::Provider { provider: ProviderKind::ClaudeCode }],
+    });
+    let Ok(Reply::ProjectCreated { project }) = created else { panic!("{created:?}") };
+    assert_eq!(project, ProjectId(1));
+    let model = |provider| ModelChoice {
+        provider,
+        model: String::new(),
+        grade: ModelGrade::Frontier,
+        effort: Effort::High,
+    };
+    let start = |provider, prompt: &str| Command::StartCommander {
+        project,
+        model: model(provider),
+        prompt: prompt.into(),
+    };
+    assert!(client.request(start(ProviderKind::Codex, "Plan")).is_err(), "Codex is not allowed");
 
     // Only Claude Code is on this PATH, so the router must choose it, at the difficulty's effort.
     let Reply::ModelChosen { choice: Some(choice) } = client
@@ -131,6 +150,7 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
             difficulty: maestro_core::Difficulty::Hard,
             tags: Vec::new(),
             host: Host::Local,
+            project: Some(project),
         })
         .unwrap()
     else {
@@ -141,26 +161,19 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
         (ProviderKind::ClaudeCode, Effort::High)
     );
 
-    let commander = client
-        .request(Command::StartCommander {
-            model: ModelChoice {
-                provider: ProviderKind::ClaudeCode,
-                model: String::new(),
-                grade: ModelGrade::Frontier,
-                effort: Effort::High,
-            },
-            workspace: Workspace {
-                host: Host::Local,
-                repository: repository.path().into(),
-                worktree: None,
-            },
-            target: Some(target),
-            prompt: "Plan two steps".into(),
-        })
-        .unwrap();
+    let commander = client.request(start(ProviderKind::ClaudeCode, "Plan two steps")).unwrap();
     let Reply::AgentStarted { agent: commander } = commander else { panic!("{commander:?}") };
+    // One commander per project.
+    assert!(client.request(start(ProviderKind::ClaudeCode, "Again")).is_err());
     let planned = until(&events, |flow| flow.nodes().count() == 2);
     assert_eq!(planned.title, "Two steps");
+    // The project's only repository was used without the plan naming it.
+    assert_eq!(planned.project, Some(project));
+    assert_eq!(planned.target.as_ref().unwrap().worktrees, trees);
+    let Reply::Projects { projects } = client.request(Command::ListProjects).unwrap() else {
+        panic!()
+    };
+    assert_eq!(projects[0].commander, Some(commander));
     assert_eq!(planned.topological_order(), [NodeId(1), NodeId(2)]);
     let workflow = planned.id;
 
@@ -171,6 +184,7 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     let follow = until(&events, |flow| flow.title == "Follow-up");
     let briefed = std::fs::read_to_string(scratch.path().join("briefed")).unwrap();
     assert!(briefed.contains("<maestro-status>"), "{briefed}");
+    assert!(briefed.contains("<maestro-project name=\\\"Site\\\">"), "{briefed}");
     assert!(briefed.contains(r#"wf1/n2 \"Second\": running"#), "{briefed}");
     assert!(briefed.contains("Then do more"), "{briefed}");
     // The step that needs nothing starts at once; the other waits.
@@ -183,7 +197,7 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
         until(&events, |flow| flow.id == follow.id && status(flow, 1) == NodeStatus::Succeeded);
     assert!(third.node(NodeId(1)).unwrap().after.len() == 1);
     // It started once the second step was done, with that work merged into its worktree.
-    let seen = std::fs::read_to_string(trees.path().join("maestro-wf2-n1/maestro-wf2-n1.seen"));
+    let seen = std::fs::read_to_string(trees.join("maestro-wf2-n1/maestro-wf2-n1.seen"));
     let seen = seen.unwrap();
     assert!(seen.contains("maestro-wf1-n2.txt") && seen.contains("maestro-wf1-n1.txt"), "{seen}");
 
@@ -197,8 +211,8 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     assert_eq!((effort(1), effort(2)), (Effort::Low, Effort::High));
 
     // Each worker worked in its own worktree; the second saw the first's work already merged in.
-    let first = trees.path().join("maestro-wf1-n1");
-    let second = trees.path().join("maestro-wf1-n2");
+    let first = trees.join("maestro-wf1-n1");
+    let second = trees.join("maestro-wf1-n2");
     let seen = std::fs::read_to_string(second.join("maestro-wf1-n2.seen")).unwrap();
     assert!(seen.contains("maestro-wf1-n1.txt"), "{seen}");
     // Their work was committed on their branches.
@@ -236,4 +250,5 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
 
     client.request(Command::RateNode { workflow, node: NodeId(1), rating: 5 }).unwrap();
     assert!(client.request(Command::RateNode { workflow, node: NodeId(1), rating: 9 }).is_err());
+    std::fs::remove_dir_all(&trees).ok();
 }

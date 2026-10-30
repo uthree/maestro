@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::id::WorkflowId;
+use crate::id::{ResourceId, WorkflowId};
 use crate::routing::Difficulty;
 use crate::workflow::{
     NodeDraft, NodeOrigin, NodeRef, NodeStatus, Workflow, WorkflowError, WorkflowTarget,
@@ -37,6 +37,7 @@ Discuss the plan with the user first. Once they agree, include it in your reply 
 
 ```maestro-plan
 {"title": "Short name of the whole job",
+ "resource": "r1",
  "nodes": [
    {"key": "api", "title": "Add the endpoint", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": []},
    {"key": "ui", "title": "Show it in the UI", "instructions": "...", "difficulty": "easy", "tags": ["ui"], "depends_on": ["api"]}
@@ -44,6 +45,8 @@ Discuss the plan with the user first. Once they agree, include it in your reply 
 ```
 
 Keys are short names used only to express dependencies within the plan.
+
+You lead one project. A <maestro-project> block, which Maestro adds ahead of a message the first time and whenever it changes, lists the project's resources with their ids: GitHub repositories, folders on a machine, SSH machines, and the AI providers workers may use. Decide which repository or folder each plan works in and put its id in the plan as "resource": "r1". A GitHub repository is cloned onto a machine first: add "machine": "r3" to run it on an SSH machine of the project, or leave it out for the daemon's own machine. A folder always runs on its own machine. When the project has a single repository you may leave "resource" out. When it is not clear which resource the user means, or the choice matters (a slow machine, a repository they might not want touched), say which you would use and why, and ask before writing the plan. One plan works in one repository; for work in several, write one plan for each. If the project lacks something the work needs, tell the user to add it to the project.
 
 Work runs in the background, and the user keeps talking with you while it does, so they may ask for more before earlier work is finished. A message may begin with a <maestro-status> block that Maestro adds: it lists the work already planned, each step with its id (such as wf1/n2) and where it is. The user does not see it. When a new step needs a listed step's result (it changes the same code, or builds on what that step adds), put that step's id in the new step's "after" list, as in "after": ["wf1/n2"]. Maestro then starts the new step by itself once those steps have succeeded, with their work merged into its worktree. Leave "after" out for work that does not need them, so that it starts at once and runs in parallel.
 
@@ -57,6 +60,12 @@ pub const WORKER_INSTRUCTIONS: &str = "You are a Maestro worker carrying out one
 pub struct Plan {
     /// A name for the whole job.
     pub title: String,
+    /// The project's repository or folder it works in, by resource id (`r1`).
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// The project's SSH machine a GitHub repository is cloned onto and worked on.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// Its steps.
     pub nodes: Vec<PlanNode>,
 }
@@ -111,6 +120,9 @@ pub enum PlanError {
     /// The dependencies loop.
     #[error("the plan's dependencies loop: {0}")]
     Cycle(WorkflowError),
+    /// `resource` or `machine` is not a resource id.
+    #[error("{0:?} is not a resource id like r1")]
+    NotAResource(String),
 }
 
 impl Plan {
@@ -129,6 +141,17 @@ impl Plan {
             rest = &body[end + 3..];
         }
         plans
+    }
+
+    /// The resource ids the plan names for its repository and its machine.
+    pub fn resources(&self) -> Result<(Option<ResourceId>, Option<ResourceId>), PlanError> {
+        let parse = |field: &Option<String>| match field.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(text) => ResourceId::parse(text)
+                .map(Some)
+                .ok_or_else(|| PlanError::NotAResource(text.into())),
+        };
+        Ok((parse(&self.resource)?, parse(&self.machine)?))
     }
 
     /// The plan as a workflow, every node marked as the commander's. `exists` says whether a
@@ -260,7 +283,7 @@ mod tests {
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
             after: Vec::new(),
         };
-        let plan = |nodes| Plan { title: "t".into(), nodes };
+        let plan = |nodes| Plan { title: "t".into(), resource: None, machine: None, nodes };
         let id = WorkflowId(1);
         assert!(matches!(
             plan(vec![node("a", &["b"]), node("b", &["a"])]).into_workflow(id, None, |_| false),
@@ -288,7 +311,12 @@ mod tests {
             depends_on: Vec::new(),
             after: vec![after.into()],
         };
-        let plan = |after| Plan { title: "t".into(), nodes: vec![step(after)] };
+        let plan = |after| Plan {
+            title: "t".into(),
+            resource: None,
+            machine: None,
+            nodes: vec![step(after)],
+        };
         let exists = |other| other == earlier;
         let flow = plan("wf1/n2").into_workflow(WorkflowId(2), None, exists).unwrap();
         assert_eq!(flow.node(NodeId(1)).unwrap().after, [earlier]);
@@ -304,7 +332,7 @@ mod tests {
     #[test]
     fn the_status_report_names_every_step_and_what_it_waits_on() {
         assert_eq!(status_report([]), None);
-        let plan = |nodes| Plan { title: "Job".into(), nodes };
+        let plan = |nodes| Plan { title: "Job".into(), resource: None, machine: None, nodes };
         let node = |key: &str, depends: &[&str], after: &[&str]| PlanNode {
             key: key.into(),
             title: key.to_uppercase(),

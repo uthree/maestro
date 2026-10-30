@@ -28,7 +28,7 @@ fn two_frontends_share_one_daemon() {
 
     assert_eq!(gui.request(Command::Ping).unwrap(), Reply::Pong);
     let Reply::WorkflowCreated { workflow } =
-        gui.request(Command::CreateWorkflow { title: "release".into() }).unwrap()
+        gui.request(Command::CreateWorkflow { title: "release".into(), project: None }).unwrap()
     else {
         panic!("expected a new workflow");
     };

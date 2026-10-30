@@ -14,8 +14,8 @@ use std::io::{self, BufRead, Write};
 
 use maestro_core::{
     AgentEvent, AgentId, AgentSpec, Choice, Difficulty, Host, ModelChoice, NodeDraft, NodeEdit,
-    NodeId, NodeRef, ProviderKind, ProviderStatus, Router, SetupAction, Workflow, WorkflowId,
-    WorkflowTarget, Workspace,
+    NodeId, NodeRef, Project, ProjectId, ProviderKind, ProviderStatus, Resource, ResourceId,
+    Router, SetupAction, Workflow, WorkflowId, WorkflowTarget, Workspace,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,6 +36,43 @@ pub struct RequestId(pub u64);
 pub enum Command {
     /// Checks the connection; answered with [`Reply::Pong`].
     Ping,
+    /// Lists every project in full.
+    ListProjects,
+    /// Creates a project.
+    CreateProject {
+        /// Its name.
+        name: String,
+        /// What it starts with.
+        #[serde(default)]
+        resources: Vec<Resource>,
+    },
+    /// Renames a project.
+    RenameProject {
+        /// Which one.
+        project: ProjectId,
+        /// Its new name.
+        name: String,
+    },
+    /// Deletes a project and its workflows, stopping its commander. Refused while any of its
+    /// work is under way, or while work elsewhere waits on it.
+    DeleteProject {
+        /// Which one.
+        project: ProjectId,
+    },
+    /// Adds a resource to a project. Its commander is told at its next message.
+    AddResource {
+        /// Which project.
+        project: ProjectId,
+        /// The resource.
+        resource: Resource,
+    },
+    /// Removes a resource from a project. Workflows already placed on it keep running there.
+    RemoveResource {
+        /// Which project.
+        project: ProjectId,
+        /// Which resource.
+        resource: ResourceId,
+    },
     /// Lists every workflow.
     ListWorkflows,
     /// Fetches one workflow in full.
@@ -47,6 +84,9 @@ pub enum Command {
     CreateWorkflow {
         /// Its name.
         title: String,
+        /// The project it belongs to.
+        #[serde(default)]
+        project: Option<ProjectId>,
     },
     /// Adds a node to a workflow.
     AddNode {
@@ -106,6 +146,17 @@ pub enum Command {
         /// The repository and branches, or `None` to make it a sketch again.
         target: Option<WorkflowTarget>,
     },
+    /// Sets where a workflow of a project runs, from the project's resources, as a commander's
+    /// plan does: a repository or folder, and the machine a GitHub repository is cloned onto.
+    /// Clones the repository there if it is missing.
+    PlaceWorkflow {
+        /// Which workflow; it must belong to a project.
+        workflow: WorkflowId,
+        /// The repository or folder, or `None` for the project's only one.
+        resource: Option<ResourceId>,
+        /// The machine, for a GitHub repository; `None` is the daemon's machine.
+        machine: Option<ResourceId>,
+    },
     /// Edits a node's title, instructions, model or difficulty.
     EditNode {
         /// Which workflow.
@@ -153,17 +204,17 @@ pub enum Command {
         /// The contender whose work to keep.
         agent: AgentId,
     },
-    /// Starts a commander: an agent that converses with the user and writes plans, which become
-    /// new workflows and start at once when it has a target. The user talks to it with
-    /// [`Command::SendToAgent`]; each message reaches it after a status report of the work under
-    /// way when that has changed, so new work can wait on what is still running.
+    /// Starts a project's commander: an agent that converses with the user and writes plans,
+    /// which become workflows of the project and start at once when they name where to run. The
+    /// user talks to it with [`Command::SendToAgent`]; each message reaches it after the
+    /// project's resources and a status report of its work, whenever those have changed, so it
+    /// can choose resources and make new work wait on what is still running. A project has one
+    /// commander: this is refused while it has one running, and replaces one that has exited.
     StartCommander {
-        /// The model it runs on.
+        /// The project it leads.
+        project: ProjectId,
+        /// The model it runs on; the project must allow its provider.
         model: ModelChoice,
-        /// Where it runs and what it may read. It is given no worktree and may not write.
-        workspace: Workspace,
-        /// Where the workflows it plans will run.
-        target: Option<WorkflowTarget>,
         /// The user's first message.
         prompt: String,
     },
@@ -176,6 +227,9 @@ pub enum Command {
         tags: Vec<String>,
         /// The host the worker would run on; only providers installed there count.
         host: Host,
+        /// The project the node is in; only the providers it allows count.
+        #[serde(default)]
+        project: Option<ProjectId>,
     },
     /// Fetches the router's settings: its catalog, its weights, when nodes are compared, and the
     /// providers switched off.
@@ -340,6 +394,21 @@ pub enum Reply {
     Pong,
     /// The command succeeded and has nothing to return.
     Done,
+    /// Every project.
+    Projects {
+        /// In id order.
+        projects: Vec<Project>,
+    },
+    /// A project was created.
+    ProjectCreated {
+        /// Its id.
+        project: ProjectId,
+    },
+    /// A resource was added to a project.
+    ResourceAdded {
+        /// Its id within the project.
+        resource: ResourceId,
+    },
     /// Every workflow.
     Workflows {
         /// One line each.
@@ -411,6 +480,18 @@ pub enum CommandError {
         /// The id asked for.
         workflow: WorkflowId,
     },
+    /// No project has that id.
+    #[error("project {project} does not exist")]
+    UnknownProject {
+        /// The id asked for.
+        project: ProjectId,
+    },
+    /// The project refused the edit or the choice of resources.
+    #[error("{message}")]
+    Project {
+        /// What the project said, in words.
+        message: String,
+    },
     /// The workflow refused the edit.
     #[error("{message}")]
     Workflow {
@@ -438,6 +519,21 @@ pub enum CommandError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Event {
+    /// A project was created or edited, or its commander changed.
+    ProjectChanged {
+        /// The project as it now is.
+        project: Project,
+    },
+    /// A project was deleted, with its workflows.
+    ProjectRemoved {
+        /// Which one.
+        project: ProjectId,
+    },
+    /// A workflow was deleted with its project.
+    WorkflowRemoved {
+        /// Which one.
+        workflow: WorkflowId,
+    },
     /// A workflow was created or edited; the whole graph is sent so a view can redraw from it.
     WorkflowChanged {
         /// The graph as it now is.

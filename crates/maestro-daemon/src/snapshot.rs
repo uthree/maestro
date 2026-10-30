@@ -1,17 +1,21 @@
 //! The daemon's working state on disk, so that it can stop when nothing needs it and pick up
 //! where it left off when a frontend next starts it.
 //!
-//! `state.json` in the daemon's home holds every workflow and every agent's transcript. Agent
+//! `state.json` in the daemon's home holds every project, every workflow and every agent's
+//! transcript. Agent
 //! processes do not survive the daemon: a restored agent has exited, and a node whose worker was
 //! still busy when the daemon stopped has failed. A node that finished keeps its worktree and
 //! branch, so a later message to it starts a new worker there.
 
-use maestro_core::{AgentEvent, AgentId, AgentSpec, NodeStatus, Workflow};
+use maestro_core::{AgentEvent, AgentId, AgentSpec, NodeStatus, Project, Workflow};
 use serde::{Deserialize, Serialize};
 
 /// Everything in `state.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
+    // A state.json saved before projects has none.
+    #[serde(default)]
+    pub(crate) projects: Vec<Project>,
     pub(crate) workflows: Vec<Workflow>,
     pub(crate) agents: Vec<SavedAgent>,
 }
@@ -97,6 +101,7 @@ mod tests {
                 effort: Effort::Medium,
             },
             workspace: Workspace { host: Host::Local, repository: "/r".into(), worktree: None },
+            project: None,
         };
         let agent = SavedAgent {
             id: AgentId(1),
@@ -104,8 +109,12 @@ mod tests {
             transcript: vec![AgentEvent::Prompted { text: "go".into() }],
         };
 
-        let text = serde_json::to_string(&Snapshot { workflows: vec![flow], agents: vec![agent] })
-            .unwrap();
+        let text = serde_json::to_string(&Snapshot {
+            projects: Vec::new(),
+            workflows: vec![flow],
+            agents: vec![agent],
+        })
+        .unwrap();
         let settled = serde_json::from_str::<Snapshot>(&text).unwrap().settle();
 
         let flow = &settled.workflows[0];

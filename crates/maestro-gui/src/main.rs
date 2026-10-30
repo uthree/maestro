@@ -12,6 +12,9 @@
 //! by itself and always speaks this window's protocol, and `--repo` defaults to the git checkout
 //! the app was started in.
 //!
+//! The window opens a project: the one with that repository among its folders, made if there is
+//! none, or else the newest.
+//!
 //! The window speaks English or Japanese: `--lang`, else the language picked in Settings, else
 //! `MAESTRO_LANG`, else the system's language. `--appearance` and `--direction` likewise win over
 //! the look picked in Settings for one run.
@@ -24,6 +27,7 @@ mod input;
 mod link;
 mod panels;
 mod prefs;
+mod project;
 mod settings;
 
 use std::path::PathBuf;
@@ -36,7 +40,7 @@ use gpui::{
 use maestro_client::Launch;
 use prefs::Preferences;
 
-use crate::app::{Maestro, Project};
+use crate::app::{Maestro, Start};
 
 /// The smallest window the layout fits without cutting off controls.
 const MIN_SIZE: (f32, f32) = (900., 600.);
@@ -94,7 +98,7 @@ fn main() -> ExitCode {
     let repository = argument("--repo")
         .map(PathBuf::from)
         .or_else(|| (!matches!(launch, Launch::Ssh { .. })).then(checkout_here).flatten());
-    let project = Project::new(repository, argument("--base").unwrap_or_else(|| "main".into()));
+    let start = Start::new(repository, argument("--base").unwrap_or_else(|| "main".into()));
     let direction = argument("--direction")
         .and_then(|id| Direction::from_id(&id))
         .or(saved.direction())
@@ -118,7 +122,7 @@ fn main() -> ExitCode {
         let options = window_options("Maestro", (1600., 1000.), MIN_SIZE, cx);
         cx.open_window(options, |window, cx| {
             atelier::set_window_background(window, &Theme::new(direction, appearance));
-            let view = cx.new(|cx| Maestro::new(launch, project, window, cx));
+            let view = cx.new(|cx| Maestro::new(launch, start, window, cx));
             // gpui-component's text input finds its window through a `Root` at the top. Its
             // own frame only draws for client-side decorations, which Atelier asks for on
             // Linux alone; on macOS and Windows it is a plain container.

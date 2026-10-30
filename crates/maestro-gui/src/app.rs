@@ -22,8 +22,8 @@ use maestro_client::mirror::Notice;
 use maestro_client::{Client, Launch, Mirror};
 use maestro_core::{
     AgentId, AgentRole, Difficulty, Effort, Host, ModelChoice, ModelGrade, NodeDraft, NodeEdit,
-    NodeId, NodeOrigin, NodeRef, NodeStatus, ProviderKind, Workflow, WorkflowId, WorkflowTarget,
-    Workspace,
+    NodeId, NodeOrigin, NodeRef, NodeStatus, Project, ProjectId, ProviderKind, Resource,
+    ResourceId, Workflow, WorkflowId,
 };
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
@@ -78,33 +78,25 @@ impl Progress {
     }
 }
 
-/// The repository commanders read and workflows run in, on the daemon's machine.
-pub struct Project {
-    /// Its main checkout, once chosen.
+/// The repository given on the command line, on the daemon's machine: the window opens the
+/// project that has it as a folder, creating one if none does.
+pub struct Start {
+    /// Its main checkout.
     pub repository: Option<PathBuf>,
     /// The branch work starts from and pull requests merge into.
     pub base: String,
 }
 
-impl Project {
-    /// A project as given on the command line.
+impl Start {
+    /// What the command line asked for.
     pub fn new(repository: Option<PathBuf>, base: String) -> Self {
         Self { repository, base }
     }
 
-    /// Where a workflow's workers run: worktrees beside the main checkout, so they never show
-    /// up in it as untracked files.
-    pub fn target(&self) -> Option<WorkflowTarget> {
-        let repository = self.repository.clone()?;
-        let mut worktrees = repository.clone().into_os_string();
-        worktrees.push("-worktrees");
-        Some(WorkflowTarget {
-            host: Host::Local,
-            repository,
-            base: self.base.clone(),
-            worktrees: worktrees.into(),
-            publish: false,
-        })
+    /// The folder resource it stands for.
+    fn folder(&self) -> Option<Resource> {
+        let path = self.repository.clone()?;
+        Some(Resource::Directory { host: Host::Local, path, base: self.base.clone() })
     }
 }
 
@@ -128,10 +120,12 @@ pub struct Fields {
     pub title: Entity<InputState>,
     /// The selected node's instructions.
     pub instructions: Entity<InputState>,
-    /// The project's repository path.
-    pub repository: Entity<InputState>,
-    /// The project's base branch.
-    pub base: Entity<InputState>,
+    /// The open project's name.
+    pub project_name: Entity<InputState>,
+    /// A resource to add: a GitHub repository, a folder's path, or an SSH destination.
+    pub resource: Entity<InputState>,
+    /// The base branch of a repository or folder to add.
+    pub resource_base: Entity<InputState>,
 }
 
 impl Fields {
@@ -160,7 +154,19 @@ pub struct Maestro {
     pub(crate) launch: Launch,
     pub(crate) connection: Connection,
     pub(crate) mirror: Mirror,
-    pub(crate) project: Project,
+    /// What the command line asked to open, until the window has connected.
+    pub(crate) start: Option<Start>,
+    /// The project on screen: its conversation, its workflows and its resources.
+    pub(crate) project: Option<ProjectId>,
+    /// Whether the project's resources are open beside the conversation, in the workflow's
+    /// place.
+    pub(crate) resources_open: bool,
+    /// Which kind of resource the project pane adds: GitHub, folder or machine.
+    pub(crate) resource_kind: usize,
+    /// The machine a folder to add is on: 0 is the daemon's, then the project's machines.
+    pub(crate) resource_host: usize,
+    /// Which project the name field was filled from.
+    pub(crate) naming: Option<ProjectId>,
     /// The workflow on the canvas, whether or not its pane is open.
     pub(crate) workflow: Option<WorkflowId>,
     /// Whether the workflow pane is open beside the conversation.
@@ -171,7 +177,7 @@ pub struct Maestro {
     pub(crate) selected: Option<NodeId>,
     /// Which node the title and instruction fields were filled from.
     pub(crate) editing: Option<(WorkflowId, NodeId)>,
-    /// The commander in the conversation.
+    /// The project's commander, whose conversation is on screen.
     pub(crate) conversation: Option<AgentId>,
     /// Where the conversation is scrolled.
     pub(crate) chat_scroll: ScrollHandle,
@@ -205,32 +211,27 @@ pub struct Maestro {
 
 impl Maestro {
     /// Opens the window's view and starts connecting.
-    pub fn new(
-        launch: Launch,
-        project: Project,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let repository = project.repository.as_ref().map(|path| path.display().to_string());
+    pub fn new(launch: Launch, start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let [composer, node_message, title, instructions] = Fields::placeholders();
         let fields = Fields {
             composer: input::area(composer, "", 8, window, cx),
             node_message: input::area(node_message, "", 6, window, cx),
             title: input::line(title, "", window, cx),
             instructions: input::area(instructions, "", 12, window, cx),
-            repository: input::line(
-                "/path/to/repository",
-                &repository.unwrap_or_default(),
-                window,
-                cx,
-            ),
-            base: input::line("main", &project.base, window, cx),
+            project_name: input::line(tr("Project name", "プロジェクト名"), "", window, cx),
+            resource: input::line("owner/name", "", window, cx),
+            resource_base: input::line("main", "", window, cx),
         };
         let mut view = Self {
             launch,
             connection: Connection::Connecting,
             mirror: Mirror::default(),
-            project,
+            start: Some(start),
+            project: None,
+            resources_open: false,
+            resource_kind: 0,
+            resource_host: 0,
+            naming: None,
             workflow: None,
             workflow_open: false,
             workflow_full: false,
@@ -271,8 +272,7 @@ impl Maestro {
                             this.connection = Connection::Ready(opened.client);
                             this.mirror = opened.mirror;
                             this.notices_seen = this.mirror.notices.len();
-                            this.workflow = this.mirror.workflows.keys().next_back().copied();
-                            this.conversation = this.mirror.commanders().last().map(|(id, _)| id);
+                            this.open_start(cx);
                             Some(opened.events)
                         }
                         Err(error) => {
@@ -312,12 +312,115 @@ impl Maestro {
             Event::Planned { agent, workflow } if Some(agent) == self.conversation => {
                 self.show_workflow(workflow);
             }
-            Event::WorkflowChanged { workflow } if self.workflow.is_none() => {
+            Event::WorkflowChanged { workflow }
+                if self.workflow.is_none() && workflow.project == self.project =>
+            {
                 self.show_workflow(workflow.id);
+            }
+            // A new commander for the project on screen, started here or by another frontend.
+            Event::ProjectChanged { project } if Some(project.id) == self.project => {
+                if project.commander.is_some() {
+                    self.conversation = project.commander;
+                }
+            }
+            Event::ProjectChanged { project } if self.project.is_none() => {
+                self.enter_project(project.id);
+            }
+            Event::ProjectRemoved { project } if Some(project) == self.project => {
+                let next = self.mirror.projects.keys().next_back().copied();
+                match next {
+                    Some(next) => self.enter_project(next),
+                    None => self.leave_project(),
+                }
+            }
+            Event::WorkflowRemoved { workflow } if Some(workflow) == self.workflow => {
+                self.workflow = None;
+                self.workflow_open = false;
+                self.workflow_full = false;
             }
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Opens the project the command line asked for, creating it if no project has its folder,
+    /// or else the newest project.
+    fn open_start(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.start.take().and_then(|start| start.folder()) else {
+            if let Some(&newest) = self.mirror.projects.keys().next_back() {
+                self.enter_project(newest);
+            }
+            return;
+        };
+        let Resource::Directory { path, .. } = &folder else { return };
+        let found = self.mirror.projects.values().find(|project| {
+            project.resources.iter().any(|entry| match &entry.resource {
+                Resource::Directory { host: Host::Local, path: there, .. } => there == path,
+                _ => false,
+            })
+        });
+        if let Some(id) = found.map(|project| project.id) {
+            return self.enter_project(id);
+        }
+        let name = match path.file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => tr("New project", "新しいプロジェクト").into(),
+        };
+        let command = Command::CreateProject { name, resources: vec![folder] };
+        self.request(command, cx, |this, reply, _| {
+            if let Reply::ProjectCreated { project } = reply {
+                this.enter_project(project);
+            }
+        });
+    }
+
+    /// Shows a project: its conversation, and its newest workflow when the pane opens.
+    pub(crate) fn enter_project(&mut self, project: ProjectId) {
+        if self.project == Some(project) {
+            return;
+        }
+        self.project = Some(project);
+        self.conversation = self.mirror.projects.get(&project).and_then(|found| found.commander);
+        let newest = self.mirror.workflows_of(project).next_back().map(|flow| flow.id);
+        self.workflow = None;
+        if let Some(newest) = newest {
+            self.show_workflow(newest);
+        } else {
+            self.workflow_open = false;
+            self.workflow_full = false;
+        }
+        self.selected = None;
+        self.resource_host = 0;
+    }
+
+    /// Shows no project, as when the last one was deleted.
+    fn leave_project(&mut self) {
+        self.project = None;
+        self.conversation = None;
+        self.workflow = None;
+        self.workflow_open = false;
+        self.workflow_full = false;
+        self.resources_open = false;
+        self.selected = None;
+    }
+
+    /// The project on screen.
+    pub(crate) fn open_project(&self) -> Option<&Project> {
+        self.mirror.projects.get(&self.project?)
+    }
+
+    /// The providers the open project lets its commander and workers run on.
+    pub(crate) fn allowed_providers(&self) -> Vec<ProviderKind> {
+        match self.open_project() {
+            Some(project) => project.allowed(&ProviderKind::ALL),
+            None => ProviderKind::ALL.to_vec(),
+        }
+    }
+
+    /// The provider a new commander runs on: the one picked, if the project allows it.
+    pub(crate) fn commander_provider(&self) -> ProviderKind {
+        let allowed = self.allowed_providers();
+        if allowed.contains(&self.provider) { self.provider } else { allowed[0] }
     }
 
     /// Sends a command from a background task and hands its reply to `then`. A refusal is shown
@@ -373,6 +476,17 @@ impl Maestro {
     pub(crate) fn open_workflow(&mut self, workflow: WorkflowId) {
         self.show_workflow(workflow);
         self.workflow_open = true;
+        self.resources_open = false;
+    }
+
+    /// Opens or closes the project's resources in the pane beside the conversation.
+    pub(crate) fn toggle_resources(&mut self, cx: &mut Context<Self>) {
+        self.resources_open = !self.resources_open;
+        if self.resources_open {
+            self.workflow_open = false;
+            self.workflow_full = false;
+        }
+        cx.notify();
     }
 
     /// Closes the workflow pane, leaving the conversation.
@@ -385,7 +499,7 @@ impl Maestro {
     /// The room beside the sidebar, and whether the sidebar takes its share of the window.
     fn room(&self, cx: &Context<Self>) -> (bool, Pixels) {
         let width = self.window_width;
-        let pane = self.workflow_open && self.workflow.is_some();
+        let pane = (self.workflow_open && self.workflow.is_some()) || self.resources_open;
         // The sidebar folds away first, so the conversation and the workflow keep their room.
         let sidebar = self.sidebar_open
             && width >= cx.theme().density.sidebar_width
@@ -426,14 +540,20 @@ impl Maestro {
         self.fields.instructions.update(cx, |state, cx| state.set_value(instructions, window, cx));
     }
 
-    /// Reads the project fields into the project.
-    fn read_project(&mut self, cx: &Context<Self>) {
-        let repository = input::text(&self.fields.repository, cx);
-        let repository = repository.trim();
-        self.project.repository = (!repository.is_empty()).then(|| PathBuf::from(repository));
-        let base = input::text(&self.fields.base, cx);
-        let base = base.trim();
-        self.project.base = if base.is_empty() { "main".into() } else { base.into() };
+    /// Fills the name field from the open project when another project's name is in it.
+    fn fill_project_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.naming == self.project {
+            return;
+        }
+        let Some(name) = self.open_project().map(|project| project.name.clone()) else { return };
+        self.naming = self.project;
+        self.fields.project_name.update(cx, |state, cx| state.set_value(name, window, cx));
+    }
+
+    /// Shows a refusal made here, before anything is sent.
+    fn refuse(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.error = Some(message.into());
+        cx.notify();
     }
 
     // Requests.
@@ -452,32 +572,19 @@ impl Maestro {
             self.command(Command::SendToAgent { agent, text }, cx);
             return;
         }
-        self.read_project(cx);
-        let Some(target) = self.project.target() else {
-            self.error = Some(
-                tr(
-                    "Choose the repository the commander should plan for.",
-                    "コマンダーに計画させるリポジトリを選んでください。",
-                )
-                .into(),
-            );
-            cx.notify();
-            return;
+        let Some(project) = self.project else {
+            return self
+                .refuse(tr("Create a project first.", "先にプロジェクトを作成してください。"), cx);
         };
         input::clear(&self.fields.composer, window, cx);
         let command = Command::StartCommander {
+            project,
             model: ModelChoice {
-                provider: self.provider,
+                provider: self.commander_provider(),
                 model: String::new(),
                 grade: ModelGrade::Standard,
                 effort: Effort::Medium,
             },
-            workspace: Workspace {
-                host: target.host.clone(),
-                repository: target.repository.clone(),
-                worktree: None,
-            },
-            target: Some(target),
             prompt: text,
         };
         self.request(command, cx, |this, reply, _| {
@@ -487,10 +594,127 @@ impl Maestro {
         });
     }
 
-    pub(crate) fn new_conversation(&mut self, cx: &mut Context<Self>) {
-        self.conversation = None;
-        self.workflow_full = false;
-        cx.notify();
+    /// Creates a project with nothing in it yet and opens its resources to fill in.
+    pub(crate) fn new_project(&mut self, cx: &mut Context<Self>) {
+        let name = tr("New project", "新しいプロジェクト").into();
+        let command = Command::CreateProject { name, resources: Vec::new() };
+        self.request(command, cx, |this, reply, cx| {
+            if let Reply::ProjectCreated { project } = reply {
+                this.enter_project(project);
+                if !this.resources_open {
+                    this.toggle_resources(cx);
+                }
+            }
+        });
+    }
+
+    /// Renames the open project from the name field.
+    pub(crate) fn rename_project(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project else { return };
+        let name = input::text(&self.fields.project_name, cx);
+        self.command(Command::RenameProject { project, name }, cx);
+    }
+
+    /// Deletes the open project and its workflows.
+    pub(crate) fn delete_project(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project else { return };
+        self.command(Command::DeleteProject { project }, cx);
+    }
+
+    /// Adds the resource the pane's fields describe to the open project.
+    pub(crate) fn add_resource(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.project else { return };
+        let text = input::text(&self.fields.resource, cx).trim().to_owned();
+        let base = input::text(&self.fields.resource_base, cx).trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        let resource = match self.resource_kind {
+            0 => match Resource::github(&text, base) {
+                Some(resource) => resource,
+                None => {
+                    return self.refuse(
+                        tr(
+                            "Write a GitHub repository as owner/name or its URL.",
+                            "GitHub リポジトリは owner/name か URL で入力してください。",
+                        ),
+                        cx,
+                    );
+                }
+            },
+            1 => Resource::Directory {
+                host: self.resource_hosts().get(self.resource_host).cloned().unwrap_or(Host::Local),
+                path: PathBuf::from(text),
+                base,
+            },
+            _ => Resource::Machine { destination: text },
+        };
+        input::clear(&self.fields.resource, window, cx);
+        self.command(Command::AddResource { project, resource }, cx);
+    }
+
+    /// The machines a folder can be on: the daemon's, then the open project's SSH machines.
+    pub(crate) fn resource_hosts(&self) -> Vec<Host> {
+        let mut hosts = vec![Host::Local];
+        if let Some(project) = self.open_project() {
+            for entry in &project.resources {
+                if let Resource::Machine { destination } = &entry.resource {
+                    hosts.push(Host::Ssh { destination: destination.clone() });
+                }
+            }
+        }
+        hosts
+    }
+
+    pub(crate) fn remove_resource(&mut self, resource: ResourceId, cx: &mut Context<Self>) {
+        let Some(project) = self.project else { return };
+        self.command(Command::RemoveResource { project, resource }, cx);
+    }
+
+    /// Allows or forbids a provider in the open project. A project that lists no provider
+    /// allows every one, so forbidding the first lists all the others.
+    pub(crate) fn allow_provider(
+        &mut self,
+        provider: ProviderKind,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.open_project() else { return };
+        let id = project.id;
+        let listed: Vec<(ResourceId, ProviderKind)> = project
+            .resources
+            .iter()
+            .filter_map(|entry| match entry.resource {
+                Resource::Provider { provider } => Some((entry.id, provider)),
+                _ => None,
+            })
+            .collect();
+        if allow {
+            let resource = Resource::Provider { provider };
+            return self.command(Command::AddResource { project: id, resource }, cx);
+        }
+        if listed.is_empty() {
+            for other in ProviderKind::ALL.into_iter().filter(|other| *other != provider) {
+                let resource = Resource::Provider { provider: other };
+                self.command(Command::AddResource { project: id, resource }, cx);
+            }
+            return;
+        }
+        if let Some((resource, _)) = listed.iter().find(|(_, listed)| *listed == provider) {
+            self.command(Command::RemoveResource { project: id, resource: *resource }, cx);
+        }
+    }
+
+    /// Runs a workflow of the project on one of its repositories or folders.
+    pub(crate) fn place(
+        &mut self,
+        workflow: WorkflowId,
+        resource: ResourceId,
+        machine: Option<ResourceId>,
+        cx: &mut Context<Self>,
+    ) {
+        let command = Command::PlaceWorkflow { workflow, resource: Some(resource), machine };
+        self.command(command, cx);
     }
 
     pub(crate) fn stop_commander(&mut self, cx: &mut Context<Self>) {
@@ -515,7 +739,8 @@ impl Maestro {
     pub(crate) fn new_workflow(&mut self, cx: &mut Context<Self>) {
         self.request(
             Command::CreateWorkflow {
-                title: tr("Untitled workflow", "無題のワークフロー").into()
+                title: tr("Untitled workflow", "無題のワークフロー").into(),
+                project: self.project,
             },
             cx,
             |this, reply, _| {
@@ -526,30 +751,17 @@ impl Maestro {
         );
     }
 
-    /// Runs a workflow, first giving it the project as its target if it has none.
+    /// Runs a workflow, first placing it on the project's only repository if it has no place
+    /// to run; the daemon refuses when the project has several, and the user picks one.
     pub(crate) fn run(&mut self, workflow: WorkflowId, cx: &mut Context<Self>) {
         let Some(flow) = self.mirror.workflows.get(&workflow) else { return };
         if flow.target.is_some() {
             return self.command(Command::RunWorkflow { workflow }, cx);
         }
-        self.read_project(cx);
-        let Some(target) = self.project.target() else {
-            self.error = Some(
-                tr(
-                    "Choose the repository this workflow should run in.",
-                    "このワークフローを実行するリポジトリを選んでください。",
-                )
-                .into(),
-            );
-            return;
-        };
-        self.request(
-            Command::SetWorkflowTarget { workflow, target: Some(target) },
-            cx,
-            move |this, _, cx| {
-                this.command(Command::RunWorkflow { workflow }, cx);
-            },
-        );
+        let place = Command::PlaceWorkflow { workflow, resource: None, machine: None };
+        self.request(place, cx, move |this, _, cx| {
+            this.command(Command::RunWorkflow { workflow }, cx);
+        });
     }
 
     pub(crate) fn publish(&mut self, workflow: WorkflowId, cx: &mut Context<Self>) {
@@ -559,38 +771,14 @@ impl Maestro {
     pub(crate) fn set_publish(&mut self, publish: bool, cx: &mut Context<Self>) {
         let Some(flow) = self.current() else { return };
         let workflow = flow.id;
-        let target = flow.target.clone().or_else(|| {
-            self.read_project(cx);
-            self.project.target()
-        });
-        let Some(mut target) = target else {
-            self.error = Some(
+        let Some(mut target) = flow.target.clone() else {
+            return self.refuse(
                 tr(
-                    "Choose the repository this workflow should run in.",
-                    "このワークフローを実行するリポジトリを選んでください。",
-                )
-                .into(),
+                    "Choose where this workflow runs first.",
+                    "先にこのワークフローの実行場所を選んでください。",
+                ),
+                cx,
             );
-            return;
-        };
-        target.publish = publish;
-        self.command(Command::SetWorkflowTarget { workflow, target: Some(target) }, cx);
-    }
-
-    pub(crate) fn save_project_target(&mut self, cx: &mut Context<Self>) {
-        let Some(flow) = self.current() else { return };
-        let workflow = flow.id;
-        let publish = flow.target.as_ref().is_some_and(|target| target.publish);
-        self.read_project(cx);
-        let Some(mut target) = self.project.target() else {
-            self.error = Some(
-                tr(
-                    "Choose the repository this workflow should run in.",
-                    "このワークフローを実行するリポジトリを選んでください。",
-                )
-                .into(),
-            );
-            return;
         };
         target.publish = publish;
         self.command(Command::SetWorkflowTarget { workflow, target: Some(target) }, cx);
@@ -704,9 +892,9 @@ impl Maestro {
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let full = self.workflow_open && (self.workflow_full || !self.chat_fits_beside());
         let conversation = self.conversation.and_then(|agent| self.mirror.agents.get(&agent));
-        let title: SharedString = match (self.current(), conversation) {
+        let title: SharedString = match (self.current(), self.open_project()) {
             (Some(flow), _) if full => flow.title.clone().into(),
-            (_, Some(view)) => crate::chat::conversation_title(view).into(),
+            (_, Some(project)) => project.name.clone().into(),
             _ => "Maestro".into(),
         };
         let status = conversation.map(|view| {
@@ -716,6 +904,7 @@ impl Maestro {
         let waiting: usize =
             self.mirror.workflows.values().map(|flow| Progress::of(flow).waiting).sum();
         let has_workflow = self.workflow.is_some();
+        let has_project = self.project.is_some();
 
         TitleBar::new()
             .leading(
@@ -740,6 +929,17 @@ impl Maestro {
                 )
             })
             .trailing(
+                Button::icon_only("toggle-resources", IconName::Folder)
+                    .tooltip(if self.resources_open {
+                        tr("Hide the project's resources", "プロジェクトのリソースを隠す")
+                    } else {
+                        tr("Show the project's resources", "プロジェクトのリソースを表示")
+                    })
+                    .selected(self.resources_open)
+                    .disabled(!has_project)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_resources(cx))),
+            )
+            .trailing(
                 Button::icon_only("open-settings", IconName::Settings)
                     .tooltip(tr("Settings", "設定"))
                     .on_click(cx.listener(|this, _, _, cx| settings::open(this, cx))),
@@ -758,6 +958,7 @@ impl Maestro {
                             this.close_workflow(cx);
                         } else {
                             this.workflow_open = true;
+                            this.resources_open = false;
                             cx.notify();
                         }
                     })),
@@ -866,6 +1067,7 @@ fn text_color(tone: Tone) -> TextColor {
 impl Render for Maestro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fill_fields(window, cx);
+        self.fill_project_name(window, cx);
         if self.placeholders != i18n::lang() {
             self.placeholders = i18n::lang();
             self.fields.translate(window, cx);
@@ -873,9 +1075,11 @@ impl Render for Maestro {
         let theme = cx.theme().clone();
         self.window_width = window.viewport_size().width;
         let (sidebar, room) = self.room(cx);
-        let pane = self.workflow_open && self.current().is_some();
-        // Below the width both need, the workflow takes the conversation's place.
-        let full = pane && (self.workflow_full || room < px(CHAT_MIN_WIDTH + PANE_MIN_WIDTH));
+        let resources = self.resources_open && self.project.is_some();
+        let pane = !resources && self.workflow_open && self.current().is_some();
+        // Below the width both need, the pane takes the conversation's place.
+        let full = (pane || resources)
+            && ((pane && self.workflow_full) || room < px(CHAT_MIN_WIDTH + PANE_MIN_WIDTH));
         let pane_width = if full {
             room
         } else {
@@ -892,6 +1096,7 @@ impl Render for Maestro {
                     .when(sidebar, |row| row.child(self.sidebar(cx)))
                     .children(chat)
                     .when(pane, |row| row.child(self.workflow_pane(pane_width, full, cx)))
+                    .when(resources, |row| row.child(self.project_pane(pane_width, cx)))
                     .into_any_element()
             }
             Connection::Connecting => self.connecting(cx).into_any_element(),

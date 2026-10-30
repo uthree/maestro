@@ -115,18 +115,6 @@ pub fn effort(effort: Effort) -> &'static str {
     }
 }
 
-/// An agent status's name, as the sidebar shows it.
-pub fn agent_status(status: atelier::agent::AgentStatus) -> &'static str {
-    use atelier::agent::AgentStatus as Shown;
-    match status {
-        Shown::Idle => tr("Ready", "待機中"),
-        Shown::Running => tr("Working", "作業中"),
-        Shown::AwaitingApproval => tr("Needs approval", "承認待ち"),
-        Shown::Completed => tr("Done", "完了"),
-        Shown::Failed => tr("Stopped", "停止"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Lang;

@@ -98,7 +98,7 @@ fn the_users_pick_is_kept_and_learned_from() {
     let client = Client::connect(&Launch::InProcess(Hub::open(home.path()).unwrap())).unwrap();
     let events = client.take_events().unwrap();
     let Reply::WorkflowCreated { workflow } =
-        client.request(Command::CreateWorkflow { title: "Compare".into() }).unwrap()
+        client.request(Command::CreateWorkflow { title: "Compare".into(), project: None }).unwrap()
     else {
         panic!("expected a workflow");
     };
@@ -148,6 +148,7 @@ fn the_users_pick_is_kept_and_learned_from() {
         difficulty: Difficulty::Hard,
         tags: vec!["ui".into()],
         host: Host::Local,
+        project: None,
     };
     let Reply::ModelChosen { choice: Some(choice) } = client.request(ask).unwrap() else {
         panic!("expected a model");

@@ -91,6 +91,7 @@ fn providers_are_found_updated_and_switched_off() {
         difficulty: Difficulty::Moderate,
         tags: Vec::new(),
         host: Host::Local,
+        project: None,
     };
     let Reply::ModelChosen { choice } = client.request(choose).unwrap() else {
         panic!("expected a choice");

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::id::ProjectId;
 use crate::provider::ModelChoice;
 use crate::target::Workspace;
 
@@ -29,4 +30,7 @@ pub struct AgentSpec {
     pub model: ModelChoice,
     /// Where it runs and which files it may touch.
     pub workspace: Workspace,
+    /// The project it works for: the one a commander leads, or the one a worker's node is in.
+    #[serde(default)]
+    pub project: Option<ProjectId>,
 }

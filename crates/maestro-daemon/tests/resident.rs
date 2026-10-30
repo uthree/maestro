@@ -48,7 +48,7 @@ fn state_survives_between_connections() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("daemon.sock");
 
-    let created = once(&socket, Command::CreateWorkflow { title: "kept".into() });
+    let created = once(&socket, Command::CreateWorkflow { title: "kept".into(), project: None });
     assert!(matches!(created, Reply::WorkflowCreated { .. }));
     let Reply::Workflows { workflows } = once(&socket, Command::ListWorkflows) else { panic!() };
 
@@ -96,7 +96,7 @@ fn an_idle_daemon_exits_and_the_next_one_remembers() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    let created = once(&socket, Command::CreateWorkflow { title: "kept".into() });
+    let created = once(&socket, Command::CreateWorkflow { title: "kept".into(), project: None });
     assert!(matches!(created, Reply::WorkflowCreated { .. }));
     // With no one connected and nothing running, it saves, cleans up and goes.
     assert!(daemon.wait().unwrap().success());

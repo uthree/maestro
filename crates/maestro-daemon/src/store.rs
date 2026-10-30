@@ -46,6 +46,11 @@ impl Store {
         Ok(store)
     }
 
+    /// The daemon's home, when it keeps one.
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// Replaces the router's settings and writes them to `router.json`, keeping the old ones
     /// if they cannot be saved.
     pub(crate) fn set_router(&mut self, router: Router) -> io::Result<()> {

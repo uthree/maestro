@@ -1,6 +1,6 @@
 //! Pull requests, through the `gh` CLI signed in on the host that holds the checkout.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use maestro_core::Host;
 use serde_json::Value;
@@ -107,6 +107,28 @@ pub fn state(host: &Host, directory: &Path, number: u64) -> Result<PullRequestSt
     Ok(PullRequestState { state: field("state"), mergeable: field("mergeable") })
 }
 
+/// Where a GitHub repository is cloned on every host: `~/.maestro/checkouts/owner/name`.
+const CHECKOUT: &str = r#"set -e
+dir="$HOME/.maestro/checkouts/$1"
+if [ -d "$dir/.git" ]; then
+  git -C "$dir" pull --ff-only --quiet >&2 || echo "could not bring $dir up to date" >&2
+else
+  mkdir -p "$(dirname "$dir")"
+  gh repo clone "$1" "$dir" -- --quiet >&2
+fi
+printf '%s\n' "$dir""#;
+
+/// A checkout of `repository` (`owner/name`) on `host`, cloned with `gh` the first time and
+/// brought up to date after that. Returns its directory.
+pub fn checkout(host: &Host, repository: &str) -> Result<PathBuf, HostError> {
+    let output = HostCommand::new("sh").args(["-c", CHECKOUT, "sh", repository]).run(host)?;
+    let directory = output.lines().map(str::trim).rfind(|line| !line.is_empty());
+    directory.map(PathBuf::from).ok_or_else(|| HostError::Unexpected {
+        program: "sh".into(),
+        message: format!("no checkout directory in {output:?}"),
+    })
+}
+
 /// `gh pr create` prints the new pull request's URL as its last line.
 fn parse_created(output: &str) -> Option<PullRequest> {
     let url = output.lines().rev().map(str::trim).find(|line| line.starts_with("https://"))?;
@@ -151,6 +173,23 @@ mod tests {
             Some(PullRequest { number: 12, url: "https://github.com/o/r/pull/12".into() })
         );
         assert_eq!(parse_created("nothing"), None);
+    }
+
+    #[test]
+    fn an_existing_checkout_is_found_without_cloning() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".maestro/checkouts/o/r");
+        let git = |args: &[&str]| {
+            HostCommand::new("git").cwd(&directory).args(args.iter().copied()).run(&Host::Local)
+        };
+        std::fs::create_dir_all(&directory).unwrap();
+        git(&["init", "--quiet"]).unwrap();
+        let found = HostCommand::new("sh")
+            .args(["-c", CHECKOUT, "sh", "o/r"])
+            .env("HOME", home.path().display().to_string())
+            .run(&Host::Local)
+            .unwrap();
+        assert_eq!(found.trim(), directory.display().to_string());
     }
 
     #[test]

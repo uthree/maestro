@@ -37,3 +37,21 @@ id!(
     AgentId,
     "agent"
 );
+id!(
+    /// One project: the resources a commander may use, and the work planned with them.
+    ProjectId,
+    "p"
+);
+id!(
+    /// One resource of a project, unique within that project.
+    ResourceId,
+    "r"
+);
+
+impl ResourceId {
+    /// Reads an id as the commander writes it, `r2`, or as a bare number.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        text.strip_prefix('r').unwrap_or(text).parse().ok().map(Self)
+    }
+}
