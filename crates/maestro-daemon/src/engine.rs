@@ -35,9 +35,10 @@ use std::thread;
 use std::time::Instant;
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Contender, Difficulty, Host,
-    ModelChoice, ModelKey, Node, NodeId, NodeStatus, Outcome, Plan, ProviderKind,
-    WORKER_INSTRUCTIONS, Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
+    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Checkout, Contender,
+    Difficulty, Host, ModelChoice, ModelKey, Node, NodeId, NodeStatus, Outcome, Placement, Plan,
+    Project, ProjectId, ProviderKind, ResourceId, WORKER_INSTRUCTIONS, Workflow, WorkflowId,
+    WorkflowTarget, Workspace, Worktree,
 };
 use maestro_host::github::{self, PullRequestDraft};
 use maestro_host::{HostCommand, git};
@@ -63,6 +64,8 @@ pub(crate) fn handles(command: &Command) -> bool {
             | Command::StartCommander { .. }
             | Command::ChooseModel { .. }
             | Command::PublishWorkflow { .. }
+            | Command::DeleteProject { .. }
+            | Command::PlaceWorkflow { .. }
     )
 }
 
@@ -98,8 +101,8 @@ struct Engine {
     runtime: Arc<Runtime>,
     store: Store,
     workers: HashMap<AgentId, Worker>,
-    /// Each commander, with the target the workflows it plans get.
-    commanders: HashMap<AgentId, Option<WorkflowTarget>>,
+    /// Each running commander, with the project it leads.
+    commanders: HashMap<AgentId, ProjectId>,
     /// Which CLIs each host has, looked up once.
     providers: HashMap<Host, Vec<ProviderKind>>,
     published: Vec<WorkflowId>,
@@ -174,18 +177,30 @@ impl Engine {
                 }
                 Ok(Reply::Done)
             }
-            Command::StartCommander { model, mut workspace, target, prompt } => {
-                workspace.worktree = None;
-                let spec = AgentSpec { role: AgentRole::Commander, model, workspace };
-                let agent = self.runtime.start(spec, COMMANDER_INSTRUCTIONS.into(), &prompt)?;
-                self.commanders.insert(agent, target);
-                Ok(Reply::AgentStarted { agent })
+            Command::StartCommander { project, model, prompt } => {
+                self.start_commander(project, model, &prompt)
+            }
+            Command::DeleteProject { project } => self.delete_project(project),
+            Command::PlaceWorkflow { workflow, resource, machine } => {
+                let flow = self.snapshot(workflow)?;
+                let project = flow
+                    .project
+                    .ok_or_else(|| refused("the workflow belongs to no project; set its target"))?;
+                let mut target = self
+                    .place(project, resource, machine)?
+                    .ok_or_else(|| refused("the project has no repository or folder yet"))?;
+                target.publish = flow.target.as_ref().is_some_and(|target| target.publish);
+                self.update(workflow, |flow| flow.target = Some(target))?;
+                Ok(Reply::Done)
             }
             Command::ChooseContender { workflow, node, agent } => {
                 self.choose(workflow, node, agent)
             }
-            Command::ChooseModel { difficulty, tags, host } => {
-                let available = self.providers(&host);
+            Command::ChooseModel { difficulty, tags, host, project } => {
+                let mut available = self.providers(&host);
+                if let Some(project) = project {
+                    available = self.project(project)?.allowed(&available);
+                }
                 let outcomes = self.store.outcomes();
                 let choice = self.store.router.choose(difficulty, &tags, &outcomes, &available);
                 Ok(Reply::ModelChosen { choice })
@@ -398,10 +413,22 @@ impl Engine {
         let target = flow.target.clone().ok_or("the workflow has no target")?;
         let node = flow.node(id).ok_or("the node is gone")?;
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
+        let project = match flow.project {
+            Some(project) => Some(self.project(project).map_err(|error| error.to_string())?),
+            None => None,
+        };
         let models: Vec<ModelChoice> = match &node.model {
-            Some(model) => vec![model.clone()],
+            Some(model) => {
+                if let Some(project) = &project {
+                    project.check(model.provider).map_err(|error| error.to_string())?;
+                }
+                vec![model.clone()]
+            }
             None => {
-                let available = self.providers(&target.host);
+                let mut available = self.providers(&target.host);
+                if let Some(project) = &project {
+                    available = project.allowed(&available);
+                }
                 let busy = self.busy(&target.host);
                 let outcomes = self.store.outcomes();
                 let router = &self.store.router;
@@ -413,7 +440,10 @@ impl Engine {
             }
         };
         if models.is_empty() {
-            return Err("no model in the router's catalog is installed on the host".into());
+            return Err(
+                "no model in the router's catalog is installed on the host and allowed by the project"
+                    .into(),
+            );
         }
 
         // The work to merge into each worktree first: what it depends on in this workflow, and
@@ -501,7 +531,12 @@ impl Engine {
                 .map_err(|error| format!("merging the work of {title:?} conflicted: {error}"))?;
         }
 
-        let spec = AgentSpec { role: AgentRole::Worker, model: model.clone(), workspace };
+        let spec = AgentSpec {
+            role: AgentRole::Worker,
+            model: model.clone(),
+            workspace,
+            project: flow.project,
+        };
         let agent = self
             .runtime
             .start(spec, WORKER_INSTRUCTIONS.into(), &brief.prompt)
@@ -563,7 +598,12 @@ impl Engine {
              this branch.\n\n# {}\n\n{}\n\n# What the user asks now\n\n{text}",
             flow.title, node.title, node.instructions
         );
-        let spec = AgentSpec { role: AgentRole::Worker, model: model.clone(), workspace };
+        let spec = AgentSpec {
+            role: AgentRole::Worker,
+            model: model.clone(),
+            workspace,
+            project: flow.project,
+        };
         let agent = self.runtime.start(spec, WORKER_INSTRUCTIONS.into(), &prompt)?;
         self.workers.insert(
             agent,
@@ -635,19 +675,26 @@ impl Engine {
     /// Turns every plan in a commander's reply into a workflow, and tells the commander about
     /// any it got wrong so it can write them again.
     fn adopt_plans(&mut self, agent: AgentId, answer: &str) {
-        let target = self.commanders.get(&agent).cloned().flatten();
+        let Some(&project) = self.commanders.get(&agent) else { return };
         let mut adopted = Vec::new();
         for plan in Plan::extract(answer) {
+            // Placing the plan may clone a repository, so it happens before the lock is taken.
+            let placed = plan.map_err(|error| error.to_string()).and_then(|plan| {
+                let (resource, machine) = plan.resources().map_err(|error| error.to_string())?;
+                let target =
+                    self.place(project, resource, machine).map_err(|error| error.to_string())?;
+                Ok((plan, target))
+            });
             let mut inner = self.inner.lock().expect("hub lock");
-            let built = plan.and_then(|plan| {
+            let built = placed.and_then(|(plan, target)| {
                 let state = &inner.state;
-                let mut workflow =
-                    plan.into_workflow(state.next_id(), target.clone(), |other| {
-                        state.contains(other)
-                    })?;
+                let mut workflow = plan
+                    .into_workflow(state.next_id(), target, |other| state.contains(other))
+                    .map_err(|error| error.to_string())?;
                 // The user agreed to the plan before the commander wrote it: set it going.
                 workflow.started = workflow.target.is_some();
                 workflow.planned_by = Some(agent);
+                workflow.project = Some(project);
                 Ok(inner.state.insert(workflow).clone())
             });
             match built {
@@ -657,8 +704,7 @@ impl Engine {
                     broadcast(&mut inner, &Event::Planned { agent, workflow: id });
                     adopted.push(id);
                 }
-                Err(error) => {
-                    let message = error.to_string();
+                Err(message) => {
                     broadcast(&mut inner, &Event::PlanRejected { agent, message: message.clone() });
                     drop(inner);
                     let text = format!(
@@ -712,6 +758,95 @@ impl Engine {
         Ok(result)
     }
 
+    /// Starts a project's commander, unless it has one running, reading the project's first
+    /// folder, or a folder of its own in the daemon's home when it has none.
+    fn start_commander(
+        &mut self,
+        project: ProjectId,
+        model: ModelChoice,
+        prompt: &str,
+    ) -> Result<Reply, CommandError> {
+        let found = self.project(project)?;
+        found.check(model.provider).map_err(|error| refused_by_project(error.to_string()))?;
+        if let Some((&agent, _)) = self.commanders.iter().find(|(_, led)| **led == project) {
+            return Err(refused_by_project(format!(
+                "the project's commander {agent} is running; write to it instead"
+            )));
+        }
+        let (host, repository) = match found.reading_room() {
+            Some(room) => room,
+            None => {
+                let home = self.store.home().map_or_else(
+                    || std::env::temp_dir().join("maestro"),
+                    std::path::Path::to_path_buf,
+                );
+                let room = home.join("projects").join(project.to_string());
+                std::fs::create_dir_all(&room)
+                    .map_err(|error| CommandError::Host { message: error.to_string() })?;
+                (Host::Local, room)
+            }
+        };
+        let workspace = Workspace { host, repository, worktree: None };
+        let spec =
+            AgentSpec { role: AgentRole::Commander, model, workspace, project: Some(project) };
+        let agent = self.runtime.start(spec, COMMANDER_INSTRUCTIONS.into(), prompt)?;
+        self.commanders.insert(agent, project);
+        let mut inner = self.inner.lock().expect("hub lock");
+        if let Some(project) = inner.state.lead(project, agent) {
+            broadcast(&mut inner, &Event::ProjectChanged { project });
+        }
+        Ok(Reply::AgentStarted { agent })
+    }
+
+    /// Deletes a project and its workflows, stopping its commander.
+    fn delete_project(&mut self, project: ProjectId) -> Result<Reply, CommandError> {
+        let removed = self.inner.lock().expect("hub lock").state.delete_project(project)?;
+        let leading: Vec<AgentId> = self
+            .commanders
+            .iter()
+            .filter(|(_, led)| **led == project)
+            .map(|(&agent, _)| agent)
+            .collect();
+        for agent in leading {
+            self.commanders.remove(&agent);
+            self.runtime.execute(Command::StopAgent { agent }).ok();
+        }
+        let mut inner = self.inner.lock().expect("hub lock");
+        for workflow in removed {
+            broadcast(&mut inner, &Event::WorkflowRemoved { workflow });
+        }
+        broadcast(&mut inner, &Event::ProjectRemoved { project });
+        Ok(Reply::Done)
+    }
+
+    /// Where work of `project` runs on the resources named, cloning a GitHub repository onto
+    /// its machine first. `None` when the project has no repository to run in.
+    fn place(
+        &mut self,
+        project: ProjectId,
+        resource: Option<ResourceId>,
+        machine: Option<ResourceId>,
+    ) -> Result<Option<WorkflowTarget>, CommandError> {
+        let placement = self
+            .project(project)?
+            .place(resource, machine)
+            .map_err(|error| refused_by_project(error.to_string()))?;
+        let Some(Placement { host, checkout, base }) = placement else { return Ok(None) };
+        let repository = match checkout {
+            Checkout::Path(path) => path,
+            Checkout::Clone(repository) => {
+                github::checkout(&host, &repository).map_err(|error| CommandError::Host {
+                    message: format!("could not clone {repository}: {error}"),
+                })?
+            }
+        };
+        Ok(Some(WorkflowTarget::beside(host, repository, base)))
+    }
+
+    fn project(&self, project: ProjectId) -> Result<Project, CommandError> {
+        Ok(self.inner.lock().expect("hub lock").state.project(project)?.clone())
+    }
+
     fn snapshot(&self, workflow: WorkflowId) -> Result<Workflow, CommandError> {
         Ok(self.inner.lock().expect("hub lock").state.workflow(workflow)?.clone())
     }
@@ -755,6 +890,10 @@ fn node_key(workflow: WorkflowId, node: &Node) -> String {
         Some(agent) if !node.contenders.is_empty() => contender_key(workflow, node.id, agent),
         _ => outcome_key(workflow, node.id),
     }
+}
+
+fn refused_by_project(message: impl Into<String>) -> CommandError {
+    CommandError::Project { message: message.into() }
 }
 
 fn refused(message: impl Into<String>) -> CommandError {

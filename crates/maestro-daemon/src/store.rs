@@ -46,6 +46,11 @@ impl Store {
         Ok(store)
     }
 
+    /// The daemon's home, when it keeps one.
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// Every outcome on record.
     pub(crate) fn outcomes(&self) -> Vec<Outcome> {
         self.outcomes.values().cloned().collect()

@@ -85,7 +85,14 @@ impl Hub {
         let path = home.join(STATE_FILE);
         let snapshot = store::read::<Snapshot>(&path)?.unwrap_or_default().settle();
         let hub = Self::with_store(store);
-        hub.inner.lock().expect("hub lock").state = State::restore(snapshot.workflows);
+        let commanders: Vec<_> = snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.spec.role == maestro_core::AgentRole::Commander)
+            .map(|agent| agent.id)
+            .collect();
+        hub.inner.lock().expect("hub lock").state =
+            State::restore(snapshot.projects, snapshot.workflows, &commanders);
         hub.runtime.restore(snapshot.agents);
         let saving = hub.clone();
         thread::spawn(move || {
@@ -101,14 +108,14 @@ impl Hub {
 
     /// Writes the state to `path` if anything changed since the last time.
     fn save_changes(&self, path: &Path) -> io::Result<()> {
-        let workflows = {
+        let (projects, workflows) = {
             let mut inner = self.inner.lock().expect("hub lock");
             if !std::mem::take(&mut inner.changed) {
                 return Ok(());
             }
-            inner.state.workflows()
+            (inner.state.projects(), inner.state.workflows())
         };
-        let snapshot = Snapshot { workflows, agents: self.runtime.saved() };
+        let snapshot = Snapshot { projects, workflows, agents: self.runtime.saved() };
         store::write(path, &snapshot)
     }
 
@@ -132,8 +139,12 @@ impl Hub {
             broadcast(&mut shared.lock().expect("hub lock"), &event);
         }));
         let shared = Arc::clone(&inner);
-        runtime.brief_with(Box::new(move || {
-            maestro_core::status_report(&shared.lock().expect("hub lock").state.workflows())
+        runtime.brief_with(Box::new(move |spec| {
+            let state = &shared.lock().expect("hub lock").state;
+            match spec.project {
+                Some(project) => state.briefing(project),
+                None => maestro_core::status_report(&state.workflows()),
+            }
         }));
         let engine = engine::spawn(Arc::clone(&inner), Arc::clone(&runtime), store);
         Self { inner, runtime, engine }

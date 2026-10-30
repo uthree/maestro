@@ -1,6 +1,6 @@
 //! A frontend's copy of the daemon's state, kept current by applying [`Event`]s.
 //!
-//! The daemon owns the workflows and the agents; a frontend holds a [`Mirror`] of them, loaded
+//! The daemon owns the projects, the workflows and the agents; a frontend holds a [`Mirror`] of them, loaded
 //! once with [`Mirror::load`] and then moved along by [`Mirror::apply`] for every event. It also
 //! folds each agent's [`AgentEvent`]s into a [`Transcript`] of entries a view can draw directly,
 //! so the GUI and the TUI read a conversation the same way.
@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentRole, AgentSpec, NodeId, PermissionRequest, ToolCall, Workflow,
-    WorkflowId,
+    AgentEvent, AgentId, AgentRole, AgentSpec, NodeId, PermissionRequest, Project, ProjectId,
+    ToolCall, Workflow, WorkflowId,
 };
 use maestro_protocol::{AgentStatus, AgentSummary, Command, Event, Reply};
 
@@ -18,6 +18,8 @@ use crate::{Client, ClientError};
 /// Everything a frontend shows, as of the last event applied.
 #[derive(Clone, Debug, Default)]
 pub struct Mirror {
+    /// Every project, by id.
+    pub projects: BTreeMap<ProjectId, Project>,
     /// Every workflow, by id.
     pub workflows: BTreeMap<WorkflowId, Workflow>,
     /// Every agent the daemon has started, by id.
@@ -75,6 +77,10 @@ impl Mirror {
     /// events first and apply only those received after this returns.
     pub fn load(client: &Client) -> Result<Self, ClientError> {
         let mut mirror = Self::default();
+        let Reply::Projects { projects } = client.request(Command::ListProjects)? else {
+            return Err(ClientError::Disconnected);
+        };
+        mirror.projects = projects.into_iter().map(|project| (project.id, project)).collect();
         let Reply::Workflows { workflows } = client.request(Command::ListWorkflows)? else {
             return Err(ClientError::Disconnected);
         };
@@ -110,6 +116,18 @@ impl Mirror {
     /// Moves the copy along by one event.
     pub fn apply(&mut self, event: &Event) {
         match event {
+            Event::ProjectChanged { project } => {
+                self.projects.insert(project.id, project.clone());
+            }
+            Event::ProjectRemoved { project } => {
+                self.projects.remove(project);
+            }
+            Event::WorkflowRemoved { workflow } => {
+                self.workflows.remove(workflow);
+                for plans in self.plans.values_mut() {
+                    plans.retain(|planned| planned != workflow);
+                }
+            }
             Event::WorkflowChanged { workflow } => {
                 self.workflows.insert(workflow.id, workflow.clone());
             }
@@ -144,6 +162,11 @@ impl Mirror {
                 }
             }
         }
+    }
+
+    /// A project's workflows, oldest first.
+    pub fn workflows_of(&self, project: ProjectId) -> impl DoubleEndedIterator<Item = &Workflow> {
+        self.workflows.values().filter(move |flow| flow.project == Some(project))
     }
 
     /// The commanders, oldest first.
@@ -402,6 +425,7 @@ mod tests {
                     repository: "/repo".into(),
                     worktree: None,
                 },
+                project: None,
             },
             status: AgentStatus::Working,
             transcript: Transcript::default(),
