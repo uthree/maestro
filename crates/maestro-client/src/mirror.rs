@@ -82,6 +82,9 @@ impl Mirror {
             if let Reply::Workflow { workflow } =
                 client.request(Command::GetWorkflow { workflow: summary.id })?
             {
+                if let Some(agent) = workflow.planned_by {
+                    mirror.plans.entry(agent).or_default().push(workflow.id);
+                }
                 mirror.workflows.insert(workflow.id, workflow);
             }
         }

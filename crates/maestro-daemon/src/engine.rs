@@ -396,7 +396,12 @@ impl Engine {
         for plan in Plan::extract(answer) {
             let mut inner = self.inner.lock().expect("hub lock");
             let built = plan.and_then(|plan| {
-                inner.state.insert(|id| plan.into_workflow(id, target.clone())).cloned()
+                let planned = |id| {
+                    let mut workflow = plan.into_workflow(id, target.clone())?;
+                    workflow.planned_by = Some(agent);
+                    Ok(workflow)
+                };
+                inner.state.insert(planned).cloned()
             });
             match built {
                 Ok(workflow) => {

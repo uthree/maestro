@@ -12,6 +12,7 @@
 //! by itself and always speaks this window's protocol.
 
 mod app;
+mod chat;
 mod graph;
 mod input;
 mod link;

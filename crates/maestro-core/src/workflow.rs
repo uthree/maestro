@@ -152,6 +152,8 @@ pub struct Workflow {
     pub title: String,
     /// Where its workers run; a workflow without one can be drawn and edited, not run.
     pub target: Option<WorkflowTarget>,
+    /// The commander whose plan it came from, if one wrote it.
+    pub planned_by: Option<AgentId>,
     nodes: BTreeMap<NodeId, Node>,
     edges: BTreeSet<Edge>,
     next_node: u64,
@@ -166,6 +168,8 @@ struct WorkflowRepr {
     title: String,
     #[serde(default)]
     target: Option<WorkflowTarget>,
+    #[serde(default)]
+    planned_by: Option<AgentId>,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     next_node: u64,
@@ -177,6 +181,7 @@ impl From<WorkflowRepr> for Workflow {
             id: repr.id,
             title: repr.title,
             target: repr.target,
+            planned_by: repr.planned_by,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
             next_node: repr.next_node,
@@ -190,6 +195,7 @@ impl From<Workflow> for WorkflowRepr {
             id: flow.id,
             title: flow.title,
             target: flow.target,
+            planned_by: flow.planned_by,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
             next_node: flow.next_node,
@@ -204,6 +210,7 @@ impl Workflow {
             id,
             title: title.into(),
             target: None,
+            planned_by: None,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),
             next_node: 1,
@@ -479,7 +486,8 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
-        let (flow, _) = diamond();
+        let (mut flow, _) = diamond();
+        flow.planned_by = Some(AgentId(7));
         let text = serde_json::to_string(&flow).unwrap();
         assert_eq!(serde_json::from_str::<Workflow>(&text).unwrap(), flow);
     }
