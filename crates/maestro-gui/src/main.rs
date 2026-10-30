@@ -21,6 +21,7 @@
 
 mod app;
 mod chat;
+mod composer_settings;
 mod graph;
 mod i18n;
 mod input;

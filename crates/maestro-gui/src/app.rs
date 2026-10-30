@@ -192,8 +192,14 @@ pub struct Maestro {
     pub(crate) node_tab: usize,
     /// The contender the worker tab shows, when the node ran on several models.
     pub(crate) contender: Option<AgentId>,
-    /// The CLI a new commander runs on.
-    pub(crate) provider: ProviderKind,
+    /// The model and reasoning effort a new commander runs with.
+    pub(crate) commander_model: ModelChoice,
+    /// Whether the composer's settings popover is open.
+    pub(crate) commander_settings_open: bool,
+    /// Whether the popover is choosing a model rather than showing effort.
+    pub(crate) commander_models_open: bool,
+    /// Focus for keyboard navigation within the composer's settings.
+    pub(crate) commander_settings_focus: gpui::FocusHandle,
     pub(crate) canvas: Canvas,
     /// Reasoning blocks and tool calls the user has opened.
     pub(crate) expanded: HashSet<SharedString>,
@@ -245,7 +251,15 @@ impl Maestro {
             window_width: px(0.),
             node_tab: 0,
             contender: None,
-            provider: ProviderKind::ClaudeCode,
+            commander_model: ModelChoice {
+                provider: ProviderKind::ClaudeCode,
+                model: String::new(),
+                grade: ModelGrade::Standard,
+                effort: Effort::Medium,
+            },
+            commander_settings_open: false,
+            commander_models_open: false,
+            commander_settings_focus: cx.focus_handle(),
             canvas: Canvas::default(),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
@@ -381,6 +395,8 @@ impl Maestro {
             return;
         }
         self.project = Some(project);
+        self.commander_settings_open = false;
+        self.commander_models_open = false;
         self.conversation = self.mirror.projects.get(&project).and_then(|found| found.commander);
         let newest = self.mirror.workflows_of(project).next_back().map(|flow| flow.id);
         self.workflow = None;
@@ -397,6 +413,8 @@ impl Maestro {
     /// Shows no project, as when the last one was deleted.
     fn leave_project(&mut self) {
         self.project = None;
+        self.commander_settings_open = false;
+        self.commander_models_open = false;
         self.conversation = None;
         self.workflow = None;
         self.workflow_open = false;
@@ -418,10 +436,10 @@ impl Maestro {
         }
     }
 
-    /// The provider a new commander runs on: the one picked, if the project allows it.
-    pub(crate) fn commander_provider(&self) -> ProviderKind {
+    /// The chosen model, falling back to a provider the project allows.
+    pub(crate) fn commander_choice(&self) -> ModelChoice {
         let allowed = self.allowed_providers();
-        if allowed.contains(&self.provider) { self.provider } else { allowed[0] }
+        crate::composer_settings::allowed_choice(&self.commander_model, &allowed)
     }
 
     /// Sends a command from a background task and hands its reply to `then`. A refusal is shown
@@ -578,19 +596,13 @@ impl Maestro {
                 .refuse(tr("Create a project first.", "先にプロジェクトを作成してください。"), cx);
         };
         input::clear(&self.fields.composer, window, cx);
-        let command = Command::StartCommander {
-            project,
-            model: ModelChoice {
-                provider: self.commander_provider(),
-                model: String::new(),
-                grade: ModelGrade::Standard,
-                effort: Effort::Medium,
-            },
-            prompt: text,
-        };
+        let command =
+            Command::StartCommander { project, model: self.commander_choice(), prompt: text };
         self.request(command, cx, |this, reply, _| {
             if let Reply::AgentStarted { agent } = reply {
                 this.conversation = Some(agent);
+                this.commander_settings_open = false;
+                this.commander_models_open = false;
             }
         });
     }

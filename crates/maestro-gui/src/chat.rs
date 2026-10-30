@@ -492,10 +492,15 @@ impl Maestro {
         let view = self
             .conversation
             .and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?.clone())));
-        let provider =
-            view.as_ref().map_or(self.commander_provider(), |(_, view)| view.spec.model.provider);
         let busy = view.as_ref().is_some_and(|(_, view)| view.transcript.busy);
-        let fresh = view.is_none();
+        let fresh = view.as_ref().is_none_or(|(_, view)| view.status == AgentStatus::Exited);
+        let choice = if fresh {
+            self.commander_choice()
+        } else {
+            view.as_ref()
+                .map(|(_, view)| view.spec.model.clone())
+                .unwrap_or_else(|| self.commander_choice())
+        };
 
         let mut rows = Vec::new();
         if let Some((agent, view)) = &view {
@@ -521,24 +526,12 @@ impl Maestro {
                     this.update(cx, |this, cx| this.send_to_commander(window, cx)).ok();
                 })
             })
-            .model(provider.label())
-            .when_some(provider_logo(provider), Composer::model_logo)
+            .control(self.composer_settings(&choice, fresh, cx))
             .busy(busy)
             // The daemon holds a message sent mid-turn until the turn ends.
             .queue(true)
             .on_send(cx.listener(|this, _, window, cx| this.send_to_commander(window, cx)))
-            .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
-            .when(fresh, |composer| {
-                // The provider is fixed once the conversation starts.
-                // Only the providers the project allows.
-                composer.on_model(cx.listener(|this, _, _, cx| {
-                    let allowed = this.allowed_providers();
-                    let current = this.commander_provider();
-                    let index = allowed.iter().position(|kind| *kind == current).unwrap_or(0);
-                    this.provider = allowed[(index + 1) % allowed.len()];
-                    cx.notify();
-                }))
-            });
+            .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)));
 
         div()
             .flex()
