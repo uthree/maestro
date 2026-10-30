@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 maestro-client.workspace = true
 maestro-core.workspace = true
+# The daemon rides in the same executable, so a local window never meets an older one.
+maestro-daemon.workspace = true
 maestro-protocol.workspace = true
 
 # `runtime_shaders` compiles the Metal shaders at start-up, so the app builds on a Mac with only

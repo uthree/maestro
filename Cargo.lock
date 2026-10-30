@@ -3633,6 +3633,7 @@ dependencies = [
  "gpui-component",
  "maestro-client",
  "maestro-core",
+ "maestro-daemon",
  "maestro-protocol",
 ]
 

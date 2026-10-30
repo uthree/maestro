@@ -24,10 +24,13 @@ crates/maestro-gui       the desktop app (`maestro`), built with gpui and Atelie
 ## The desktop app
 
 ```sh
-cargo build --workspace
-target/debug/maestro --repo path/to/repository            # daemon on this machine
-target/debug/maestro --ssh user@server --repo /srv/repo   # daemon, repository and agents on a server
+cargo run -p maestro-gui -- --repo path/to/repository             # daemon on this machine
+cargo run -p maestro-gui -- --ssh user@server --repo /srv/repo    # daemon, repository and agents on a server
 ```
+
+On this machine the daemon is part of the `maestro` executable and starts by itself, so there is
+nothing else to build, start or stop. With `--ssh`, the server needs `maestro-daemon` installed
+(see below).
 
 Ask the commander what to build in the panel on the right. Its plan appears as a graph of steps;
 edit them (title, instructions, difficulty, provider, dependencies), then press Run. Select a

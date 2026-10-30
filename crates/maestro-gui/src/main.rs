@@ -7,7 +7,9 @@
 //! ```
 //!
 //! With `--ssh` the daemon, the repository and every agent are on that machine and only the
-//! window is here. Without it the daemon runs on this machine, started next to this program.
+//! window is here, and that machine needs `maestro-daemon` installed. Without it the daemon runs
+//! on this machine from this same executable (`maestro --stdio`, `maestro serve`), so it starts
+//! by itself and always speaks this window's protocol.
 
 mod app;
 mod graph;
@@ -16,6 +18,7 @@ mod link;
 mod panels;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use atelier::{Appearance, Assets, Direction, Theme};
 use gpui::{
@@ -47,21 +50,22 @@ fn launch() -> Launch {
             destination,
             program: program.unwrap_or_else(|| maestro_client::DAEMON.into()),
         },
-        None => Launch::Local { program: program.unwrap_or_else(local_daemon) },
+        None => Launch::Local { program: program.unwrap_or_else(this_program) },
     }
 }
 
-/// The daemon installed beside this program, or the one on the `PATH`.
-fn local_daemon() -> String {
+/// This executable, which carries the daemon.
+fn this_program() -> String {
     std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join(maestro_client::DAEMON)))
-        .filter(|path| path.exists())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| maestro_client::DAEMON.into())
+        .map(|exe| exe.display().to_string())
+        .unwrap_or_else(|_| maestro_client::DAEMON.into())
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if maestro_daemon::resident::requested(&args) {
+        return maestro_daemon::resident::run(&args);
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let launch = launch();
     let project = Project::new(
@@ -108,4 +112,5 @@ fn main() {
         .expect("failed to open the window");
         cx.activate(true);
     });
+    ExitCode::SUCCESS
 }
