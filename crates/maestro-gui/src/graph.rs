@@ -17,10 +17,13 @@ use gpui::{
     ParentElement, PathBuilder, Pixels, Point, ScrollWheelEvent, Styled, canvas, div, fill, point,
     prelude::*, px, size,
 };
-use maestro_core::{Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId};
+use maestro_core::{
+    ModelChoice, Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId,
+};
 
 use crate::app::Maestro;
 use crate::i18n::{self, tr};
+use crate::trf;
 
 /// A node's width on the canvas.
 const NODE_WIDTH: f32 = 248.;
@@ -128,6 +131,7 @@ pub fn status_label(status: NodeStatus) -> &'static str {
         NodeStatus::Pending => tr("Waiting", "待機中"),
         NodeStatus::Running => tr("Working", "作業中"),
         NodeStatus::AwaitingUser => tr("Needs you", "要対応"),
+        NodeStatus::AwaitingChoice => tr("Pick one", "選択待ち"),
         NodeStatus::Succeeded => tr("Done", "完了"),
         NodeStatus::Failed => tr("Failed", "失敗"),
     }
@@ -138,7 +142,7 @@ pub fn status_tone(status: NodeStatus) -> Tone {
     match status {
         NodeStatus::Pending => Tone::Neutral,
         NodeStatus::Running => Tone::Accent,
-        NodeStatus::AwaitingUser => Tone::Warning,
+        NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => Tone::Warning,
         NodeStatus::Succeeded => Tone::Success,
         NodeStatus::Failed => Tone::Danger,
     }
@@ -146,6 +150,11 @@ pub fn status_tone(status: NodeStatus) -> Tone {
 
 /// The model a node runs on, or will.
 pub fn model_label(node: &Node) -> String {
+    if node.model.is_none() && !node.contenders.is_empty() {
+        let names: Vec<String> =
+            node.contenders.iter().map(|contender| choice_label(&contender.model)).collect();
+        return trf!("Compared: {}", "比較中: {}", names.join(" vs "));
+    }
     match &node.model {
         Some(choice) if choice.model.is_empty() => {
             format!("{} · {}", choice.provider.label(), i18n::effort(choice.effort))
@@ -153,6 +162,11 @@ pub fn model_label(node: &Node) -> String {
         Some(choice) => format!("{} · {}", choice.model, i18n::effort(choice.effort)),
         None => tr("Chosen when it runs", "実行時に選択").into(),
     }
+}
+
+/// A model in a few words: its name, or its provider's when it is the CLI's default.
+pub fn choice_label(choice: &ModelChoice) -> String {
+    if choice.model.is_empty() { choice.provider.label().into() } else { choice.model.clone() }
 }
 
 impl Maestro {
@@ -305,6 +319,9 @@ impl Maestro {
             NodeStatus::AwaitingUser => mark
                 .child(word(status_label(node.status), TextColor::Warning))
                 .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.warning)),
+            NodeStatus::AwaitingChoice => mark
+                .child(word(status_label(node.status), TextColor::Warning))
+                .child(Icon::new(IconName::Eye).size(px(12.)).color(theme.colors.warning)),
             NodeStatus::Succeeded => mark
                 .child(word(status_label(node.status), TextColor::Faint))
                 .child(Icon::new(IconName::Check).size(px(12.)).color(theme.colors.success)),
@@ -329,7 +346,7 @@ impl Maestro {
         let draft = node.origin == NodeOrigin::Commander && node.status == NodeStatus::Pending;
         let border = match node.status {
             _ if draft => theme.colors.agent,
-            NodeStatus::AwaitingUser => theme.colors.warning,
+            NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => theme.colors.warning,
             NodeStatus::Failed => theme.colors.danger,
             NodeStatus::Running => theme.colors.accent,
             _ if selected => theme.colors.accent,

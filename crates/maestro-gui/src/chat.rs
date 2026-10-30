@@ -110,7 +110,9 @@ pub fn provider_logo(provider: ProviderKind) -> Option<ProviderLogo> {
 fn step_state(status: NodeStatus) -> StepState {
     match status {
         NodeStatus::Pending => StepState::Pending,
-        NodeStatus::Running | NodeStatus::AwaitingUser => StepState::Running,
+        NodeStatus::Running | NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => {
+            StepState::Running
+        }
         NodeStatus::Succeeded => StepState::Done,
         NodeStatus::Failed => StepState::Failed,
     }
@@ -284,6 +286,11 @@ impl Maestro {
                 NodeStatus::AwaitingUser => steps.step_with_detail(
                     node.title.clone(),
                     tr("Waiting for you", "あなた待ち"),
+                    state,
+                ),
+                NodeStatus::AwaitingChoice => steps.step_with_detail(
+                    node.title.clone(),
+                    tr("Pick the better model's work", "良い方のモデルの成果を選んでください"),
                     state,
                 ),
                 NodeStatus::Running => {

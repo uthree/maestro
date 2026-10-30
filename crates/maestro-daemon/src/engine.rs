@@ -19,6 +19,13 @@
 //!    whichever workflow they are.
 //! 5. A message from the user to the node reopens it and counts as a revision request; the next
 //!    completion commits again and updates the outcome.
+//!
+//! When there is room (see [`maestro_core::Comparison`]), step 2 picks several models instead of
+//! one, and each gets its own worktree on its own branch (`maestro/wf1-n2-c1`, `-c2`) and its own
+//! worker. Every contender's outcome is recorded. Once they have all finished, the node waits
+//! for the user to pick whose work to keep ([`Command::ChooseContender`]); the pick is recorded
+//! as a win for that model and a loss for the others, the others stop, and the node succeeds
+//! with the chosen branch, so its dependents merge that work.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,9 +35,9 @@ use std::thread;
 use std::time::Instant;
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Difficulty, Host, ModelKey,
-    NodeId, NodeStatus, Outcome, Plan, ProviderKind, WORKER_INSTRUCTIONS, Workflow, WorkflowId,
-    WorkflowTarget, Workspace, Worktree,
+    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Contender, Difficulty, Host,
+    ModelChoice, ModelKey, Node, NodeId, NodeStatus, Outcome, Plan, ProviderKind,
+    WORKER_INSTRUCTIONS, Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
 };
 use maestro_host::github::{self, PullRequestDraft};
 use maestro_host::{HostCommand, git};
@@ -52,6 +59,7 @@ pub(crate) fn handles(command: &Command) -> bool {
         Command::RunWorkflow { .. }
             | Command::SendToNode { .. }
             | Command::RateNode { .. }
+            | Command::ChooseContender { .. }
             | Command::StartCommander { .. }
             | Command::ChooseModel { .. }
             | Command::PublishWorkflow { .. }
@@ -65,8 +73,24 @@ struct Worker {
     path: PathBuf,
     model: ModelKey,
     difficulty: Difficulty,
+    tags: Vec<String>,
     started: Instant,
     revisions: u32,
+    /// Where its outcome is recorded.
+    key: String,
+    /// One of several workers on the node, until the user picks it.
+    contender: bool,
+    /// In a turn, so using the host's compute and the provider's quota.
+    busy: bool,
+}
+
+/// What every worker on a node starts from.
+struct Brief {
+    /// The work merged into its worktree first: a branch, the title an error names it by, and
+    /// how the worker is told about it.
+    merges: Vec<(String, String, String)>,
+    /// Its first message.
+    prompt: String,
 }
 
 struct Engine {
@@ -133,6 +157,7 @@ impl Engine {
                     return self.revive(workflow, node, text);
                 };
                 worker.revisions += 1;
+                worker.busy = true;
                 self.set_status(workflow, node, NodeStatus::Running);
                 self.runtime.execute(Command::SendToAgent { agent, text })
             }
@@ -140,7 +165,11 @@ impl Engine {
                 if !(1..=5).contains(&rating) {
                     return Err(refused("a rating is from 1 to 5"));
                 }
-                if !self.store.rate(&outcome_key(workflow, node), rating) {
+                let flow = self.snapshot(workflow)?;
+                let node = flow
+                    .node(node)
+                    .ok_or_else(|| refused(format!("node {node} is not in this workflow")))?;
+                if !self.store.rate(&node_key(workflow, node), rating) {
                     return Err(refused("the node has not finished yet"));
                 }
                 Ok(Reply::Done)
@@ -152,10 +181,13 @@ impl Engine {
                 self.commanders.insert(agent, target);
                 Ok(Reply::AgentStarted { agent })
             }
-            Command::ChooseModel { difficulty, host } => {
+            Command::ChooseContender { workflow, node, agent } => {
+                self.choose(workflow, node, agent)
+            }
+            Command::ChooseModel { difficulty, tags, host } => {
                 let available = self.providers(&host);
-                let choice =
-                    self.store.router.choose(difficulty, &self.store.outcomes(), &available);
+                let outcomes = self.store.outcomes();
+                let choice = self.store.router.choose(difficulty, &tags, &outcomes, &available);
                 Ok(Reply::ModelChosen { choice })
             }
             Command::PublishWorkflow { workflow } => self.publish(workflow),
@@ -175,10 +207,13 @@ impl Engine {
             return;
         }
         let Some(worker) = self.workers.get(&agent) else { return };
-        let (workflow, node) = (worker.workflow, worker.node);
+        let (workflow, node, contender) = (worker.workflow, worker.node, worker.contender);
         match event {
+            AgentEvent::PermissionRequested { .. } if contender => {
+                self.settle(agent, NodeStatus::AwaitingUser);
+            }
             // A message the user sent during the turn that just finished opens the node again.
-            AgentEvent::Prompted { .. } => {
+            AgentEvent::Prompted { .. } if !contender => {
                 let status =
                     self.snapshot(workflow).ok().and_then(|flow| flow.node(node).map(|n| n.status));
                 if matches!(status, Some(NodeStatus::Succeeded | NodeStatus::Failed)) {
@@ -189,25 +224,33 @@ impl Engine {
                 self.set_status(workflow, node, NodeStatus::AwaitingUser);
             }
             AgentEvent::Text { .. } | AgentEvent::ToolStarted { .. } => {
-                let awaiting = self
-                    .snapshot(workflow)
-                    .ok()
-                    .and_then(|flow| flow.node(node).map(|node| node.status))
-                    == Some(NodeStatus::AwaitingUser);
-                if awaiting {
-                    self.set_status(workflow, node, NodeStatus::Running);
+                if self.status_of(agent) == Some(NodeStatus::AwaitingUser) {
+                    if contender {
+                        self.settle(agent, NodeStatus::Running);
+                    } else {
+                        self.set_status(workflow, node, NodeStatus::Running);
+                    }
                 }
             }
             AgentEvent::TurnCompleted { .. } => self.finish(agent),
             AgentEvent::TurnFailed { message } => {
                 self.record(agent, false);
-                self.fail(workflow, node, message);
+                if contender {
+                    self.settle(agent, NodeStatus::Failed);
+                } else {
+                    self.fail(workflow, node, message);
+                }
             }
             AgentEvent::Exited { reason } => {
+                let status = self.status_of(agent);
+                let working =
+                    matches!(status, Some(NodeStatus::Running | NodeStatus::AwaitingUser));
+                if working && contender {
+                    self.record(agent, false);
+                    self.settle(agent, NodeStatus::Failed);
+                }
                 self.workers.remove(&agent);
-                let status =
-                    self.snapshot(workflow).ok().and_then(|flow| flow.node(node).map(|n| n.status));
-                if matches!(status, Some(NodeStatus::Running | NodeStatus::AwaitingUser)) {
+                if working && !contender {
                     let message = reason.unwrap_or_else(|| "the worker exited".into());
                     self.fail(workflow, node, message);
                 }
@@ -216,11 +259,80 @@ impl Engine {
         }
     }
 
+    /// Where a worker's work stands: its contender's status while it is one, else its node's.
+    fn status_of(&self, agent: AgentId) -> Option<NodeStatus> {
+        let worker = self.workers.get(&agent)?;
+        let flow = self.snapshot(worker.workflow).ok()?;
+        let node = flow.node(worker.node)?;
+        if worker.contender {
+            node.contenders.iter().find(|c| c.agent == agent).map(|c| c.status)
+        } else {
+            Some(node.status)
+        }
+    }
+
+    /// Sets a contender's status, and acts on what that makes of its node.
+    fn settle(&mut self, agent: AgentId, status: NodeStatus) {
+        let Some(worker) = self.workers.get(&agent) else { return };
+        let (workflow, node) = (worker.workflow, worker.node);
+        let settled = self.update(workflow, |flow| flow.set_contender_status(node, agent, status));
+        match settled {
+            // Only one contender's work succeeded, so it was kept without asking.
+            Ok(Ok(NodeStatus::Succeeded)) => {
+                if let Some(worker) = self.workers.get_mut(&agent) {
+                    worker.contender = false;
+                }
+                self.succeeded(workflow);
+            }
+            Ok(Ok(NodeStatus::Failed)) => {
+                self.fail(workflow, node, "every model's attempt at it failed".into());
+            }
+            _ => {}
+        }
+    }
+
+    /// Keeps the work of the contender the user picked, records the pick, and stops the others.
+    fn choose(
+        &mut self,
+        workflow: WorkflowId,
+        node: NodeId,
+        agent: AgentId,
+    ) -> Result<Reply, CommandError> {
+        let contenders = self.update(workflow, |flow| {
+            flow.choose_contender(node, agent)?;
+            Ok(flow.node(node).map(|node| node.contenders.clone()).unwrap_or_default())
+        })?;
+        let contenders: Vec<Contender> =
+            contenders.map_err(|error: maestro_core::WorkflowError| refused(error.to_string()))?;
+        for contender in &contenders {
+            let key = contender_key(workflow, node, contender.agent);
+            if contender.agent == agent {
+                self.store.judge(&key, true);
+            } else if contender.status == NodeStatus::Succeeded {
+                self.store.judge(&key, false);
+            }
+            if contender.agent != agent && self.workers.contains_key(&contender.agent) {
+                self.runtime.execute(Command::StopAgent { agent: contender.agent }).ok();
+            }
+        }
+        if let Some(worker) = self.workers.get_mut(&agent) {
+            worker.contender = false;
+        }
+        self.succeeded(workflow);
+        Ok(Reply::Done)
+    }
+
     /// Commits a worker's turn, marks its node succeeded, and starts what was waiting on it.
     fn finish(&mut self, agent: AgentId) {
-        let worker = &self.workers[&agent];
-        let (workflow, node, host, path) =
-            (worker.workflow, worker.node, worker.host.clone(), worker.path.clone());
+        let Some(worker) = self.workers.get_mut(&agent) else { return };
+        worker.busy = false;
+        let (workflow, node, host, path, contender) = (
+            worker.workflow,
+            worker.node,
+            worker.host.clone(),
+            worker.path.clone(),
+            worker.contender,
+        );
         let title = self
             .snapshot(workflow)
             .ok()
@@ -228,10 +340,21 @@ impl Engine {
             .unwrap_or_default();
         if let Err(error) = git::commit_all(&host, &path, &title) {
             self.record(agent, false);
+            if contender {
+                return self.settle(agent, NodeStatus::Failed);
+            }
             return self.fail(workflow, node, format!("could not commit the work: {error}"));
         }
         self.record(agent, true);
+        if contender {
+            return self.settle(agent, NodeStatus::Succeeded);
+        }
         self.set_status(workflow, node, NodeStatus::Succeeded);
+        self.succeeded(workflow);
+    }
+
+    /// Starts what a node's success let start, and publishes a workflow that is now done.
+    fn succeeded(&mut self, workflow: WorkflowId) {
         self.advance_all();
 
         let Ok(flow) = self.snapshot(workflow) else { return };
@@ -275,32 +398,33 @@ impl Engine {
         let target = flow.target.clone().ok_or("the workflow has no target")?;
         let node = flow.node(id).ok_or("the node is gone")?;
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
-        let model = match &node.model {
-            Some(model) => model.clone(),
+        let models: Vec<ModelChoice> = match &node.model {
+            Some(model) => vec![model.clone()],
             None => {
                 let available = self.providers(&target.host);
-                self.store
-                    .router
-                    .choose(difficulty, &self.store.outcomes(), &available)
-                    .ok_or("no model in the router's catalog is installed on the host")?
-                    .model
+                let busy = self.busy(&target.host);
+                let outcomes = self.store.outcomes();
+                let router = &self.store.router;
+                router
+                    .lineup(difficulty, &node.tags, &outcomes, &available, &busy)
+                    .into_iter()
+                    .map(|choice| choice.model)
+                    .collect()
             }
         };
+        if models.is_empty() {
+            return Err("no model in the router's catalog is installed on the host".into());
+        }
 
-        let branch = format!("maestro/{}-{}", flow.id, id);
-        let workspace = node_workspace(&target, &branch);
-        prepare_worktree(&workspace).map_err(|error| error.to_string())?;
-        let path = workspace.working_directory().clone();
-        let mut done = Vec::new();
+        // The work to merge into each worktree first: what it depends on in this workflow, and
+        // earlier work it waits on when that is in the same repository. Each is a branch, the
+        // title to name it by in an error, and how the worker is told about it.
+        let mut merges: Vec<(String, String, String)> = Vec::new();
         for dependency in flow.dependencies(id) {
             let dependency = flow.node(dependency).ok_or("a dependency is gone")?;
             let Some(theirs) = &dependency.branch else { continue };
-            git::merge(&target.host, &path, theirs).map_err(|error| {
-                format!("merging the work of {:?} conflicted: {error}", dependency.title)
-            })?;
-            done.push(dependency.title.clone());
+            merges.push((theirs.clone(), dependency.title.clone(), dependency.title.clone()));
         }
-        // Earlier work this node waits on, when it is in the same repository.
         for other in &node.after {
             let Ok(earlier) = self.snapshot(other.workflow) else { continue };
             let same = earlier.target.as_ref().is_some_and(|theirs| {
@@ -308,38 +432,112 @@ impl Engine {
             });
             let Some(dependency) = earlier.node(other.node).filter(|_| same) else { continue };
             let Some(theirs) = &dependency.branch else { continue };
-            git::merge(&target.host, &path, theirs).map_err(|error| {
-                format!("merging the work of {:?} conflicted: {error}", dependency.title)
-            })?;
-            done.push(format!("{} (from \"{}\")", dependency.title, earlier.title));
+            let told = format!("{} (from \"{}\")", dependency.title, earlier.title);
+            merges.push((theirs.clone(), dependency.title.clone(), told));
         }
-
+        let done: Vec<&str> = merges.iter().map(|(_, _, told)| told.as_str()).collect();
         let mut prompt = format!("This step is part of \"{}\".", flow.title);
         if !done.is_empty() {
             prompt.push_str(&format!(" Already done and merged here: {}.", done.join(", ")));
         }
         prompt.push_str(&format!("\n\n# {}\n\n{}", node.title, node.instructions));
 
+        let brief = Brief { merges, prompt };
+        let branch = format!("maestro/{}-{}", flow.id, id);
+        if let [model] = &models[..] {
+            let agent = self.start_worker(flow, node, model, &branch, &brief, false)?;
+            let model = model.clone();
+            self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
+            return Ok(());
+        }
+
+        let mut contenders = Vec::new();
+        let mut errors = Vec::new();
+        for (index, model) in models.into_iter().enumerate() {
+            let branch = format!("{branch}-c{}", index + 1);
+            match self.start_worker(flow, node, &model, &branch, &brief, true) {
+                Ok(agent) => {
+                    contenders.push(Contender { agent, model, branch, status: NodeStatus::Running })
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        match contenders.len() {
+            0 => Err(errors.join("; ")),
+            1 => {
+                // Nothing to compare with: it is the node's only worker.
+                let Contender { agent, model, branch, .. } = contenders.remove(0);
+                if let Some(worker) = self.workers.get_mut(&agent) {
+                    worker.contender = false;
+                    worker.key = outcome_key(flow.id, id);
+                }
+                self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
+                Ok(())
+            }
+            _ => {
+                self.update(flow.id, |flow| flow.assign_contenders(id, contenders).ok()).ok();
+                Ok(())
+            }
+        }
+    }
+
+    /// Makes a worktree on `branch` with the node's dependencies merged in, and starts a worker
+    /// there.
+    fn start_worker(
+        &mut self,
+        flow: &Workflow,
+        node: &Node,
+        model: &ModelChoice,
+        branch: &str,
+        brief: &Brief,
+        contender: bool,
+    ) -> Result<AgentId, String> {
+        let target = flow.target.as_ref().ok_or("the workflow has no target")?;
+        let workspace = node_workspace(target, branch);
+        prepare_worktree(&workspace).map_err(|error| error.to_string())?;
+        let path = workspace.working_directory().clone();
+        for (theirs, title, _) in &brief.merges {
+            git::merge(&target.host, &path, theirs)
+                .map_err(|error| format!("merging the work of {title:?} conflicted: {error}"))?;
+        }
+
         let spec = AgentSpec { role: AgentRole::Worker, model: model.clone(), workspace };
         let agent = self
             .runtime
-            .start(spec, WORKER_INSTRUCTIONS.into(), &prompt)
+            .start(spec, WORKER_INSTRUCTIONS.into(), &brief.prompt)
             .map_err(|error| error.to_string())?;
+        let key = if contender {
+            contender_key(flow.id, node.id, agent)
+        } else {
+            outcome_key(flow.id, node.id)
+        };
         self.workers.insert(
             agent,
             Worker {
                 workflow: flow.id,
-                node: id,
+                node: node.id,
                 host: target.host.clone(),
                 path,
                 model: ModelKey { provider: model.provider, model: model.model.clone() },
-                difficulty,
+                difficulty: node.difficulty.unwrap_or(Difficulty::Moderate),
+                tags: node.tags.clone(),
                 started: Instant::now(),
                 revisions: 0,
+                key,
+                contender,
+                busy: true,
             },
         );
-        self.update(flow.id, |flow| flow.assign(id, agent, model, branch).ok()).ok();
-        Ok(())
+        Ok(agent)
+    }
+
+    /// The provider of every worker in a turn on `host`, once per worker.
+    fn busy(&self, host: &Host) -> Vec<ProviderKind> {
+        self.workers
+            .values()
+            .filter(|worker| worker.busy && worker.host == *host)
+            .map(|worker| worker.model.provider)
+            .collect()
     }
 
     /// Starts a new worker on a node whose worker has exited, in the node's worktree, with what
@@ -376,8 +574,12 @@ impl Engine {
                 path,
                 model: ModelKey { provider: model.provider, model: model.model.clone() },
                 difficulty: node.difficulty.unwrap_or(Difficulty::Moderate),
+                tags: node.tags.clone(),
                 started: Instant::now(),
                 revisions: 1,
+                key: node_key(workflow, node),
+                contender: false,
+                busy: true,
             },
         );
         self.update(workflow, |flow| flow.assign(id, agent, model, branch).ok())?;
@@ -480,8 +682,10 @@ impl Engine {
             seconds: worker.started.elapsed().as_secs_f64(),
             revisions: worker.revisions,
             rating: None,
+            tags: worker.tags.clone(),
+            chosen: None,
         };
-        self.store.record(outcome_key(worker.workflow, worker.node), outcome);
+        self.store.record(worker.key.clone(), outcome);
     }
 
     fn fail(&mut self, workflow: WorkflowId, node: NodeId, message: String) {
@@ -538,6 +742,19 @@ impl Engine {
 
 fn outcome_key(workflow: WorkflowId, node: NodeId) -> String {
     format!("{workflow}/{node}")
+}
+
+/// Where one contender's outcome is recorded, beside the others on the same node.
+fn contender_key(workflow: WorkflowId, node: NodeId, agent: AgentId) -> String {
+    format!("{workflow}/{node}/{agent}")
+}
+
+/// Where the outcome of the work a node kept is recorded.
+fn node_key(workflow: WorkflowId, node: &Node) -> String {
+    match node.agent {
+        Some(agent) if !node.contenders.is_empty() => contender_key(workflow, node.id, agent),
+        _ => outcome_key(workflow, node.id),
+    }
 }
 
 fn refused(message: impl Into<String>) -> CommandError {

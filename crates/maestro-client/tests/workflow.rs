@@ -129,6 +129,7 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     let Reply::ModelChosen { choice: Some(choice) } = client
         .request(Command::ChooseModel {
             difficulty: maestro_core::Difficulty::Hard,
+            tags: Vec::new(),
             host: Host::Local,
         })
         .unwrap()

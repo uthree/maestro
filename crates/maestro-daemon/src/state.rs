@@ -112,6 +112,7 @@ impl State {
             | Command::RunWorkflow { .. }
             | Command::SendToNode { .. }
             | Command::RateNode { .. }
+            | Command::ChooseContender { .. }
             | Command::StartCommander { .. }
             | Command::ChooseModel { .. }
             | Command::PublishWorkflow { .. } => {
@@ -163,6 +164,7 @@ mod tests {
             instructions: String::new(),
             model: None,
             difficulty: None,
+            tags: Vec::new(),
             origin: NodeOrigin::User,
         }
     }
