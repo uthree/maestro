@@ -39,10 +39,11 @@ use maestro_core::{
     ModelChoice, ModelKey, Node, NodeId, NodeStatus, Outcome, Plan, ProviderKind,
     WORKER_INSTRUCTIONS, Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
 };
+use maestro_host::git;
 use maestro_host::github::{self, PullRequestDraft};
-use maestro_host::{HostCommand, git};
 use maestro_protocol::{Command, CommandError, Event, Reply};
 
+use crate::providers::Providers;
 use crate::runtime::{Runtime, failed, prepare_worktree};
 use crate::store::Store;
 use crate::{Inner, broadcast};
@@ -62,6 +63,8 @@ pub(crate) fn handles(command: &Command) -> bool {
             | Command::ChooseContender { .. }
             | Command::StartCommander { .. }
             | Command::ChooseModel { .. }
+            | Command::GetRouter
+            | Command::SetRouter { .. }
             | Command::PublishWorkflow { .. }
     )
 }
@@ -100,13 +103,18 @@ struct Engine {
     workers: HashMap<AgentId, Worker>,
     /// Each commander, with the target the workflows it plans get.
     commanders: HashMap<AgentId, Option<WorkflowTarget>>,
-    /// Which CLIs each host has, looked up once.
-    providers: HashMap<Host, Vec<ProviderKind>>,
+    /// Which CLIs each host has.
+    providers: Arc<Providers>,
     published: Vec<WorkflowId>,
 }
 
 /// Starts the engine's thread and returns its inbox.
-pub(crate) fn spawn(inner: Arc<Mutex<Inner>>, runtime: Arc<Runtime>, store: Store) -> Sender<Job> {
+pub(crate) fn spawn(
+    inner: Arc<Mutex<Inner>>,
+    runtime: Arc<Runtime>,
+    providers: Arc<Providers>,
+    store: Store,
+) -> Sender<Job> {
     let (jobs, inbox) = mpsc::channel();
     let events = Mutex::new(jobs.clone());
     runtime.listen(Box::new(move |agent, event| {
@@ -118,7 +126,7 @@ pub(crate) fn spawn(inner: Arc<Mutex<Inner>>, runtime: Arc<Runtime>, store: Stor
         store,
         workers: HashMap::new(),
         commanders: HashMap::new(),
-        providers: HashMap::new(),
+        providers,
         published: Vec::new(),
     };
     thread::spawn(move || {
@@ -189,6 +197,17 @@ impl Engine {
                 let outcomes = self.store.outcomes();
                 let choice = self.store.router.choose(difficulty, &tags, &outcomes, &available);
                 Ok(Reply::ModelChosen { choice })
+            }
+            Command::GetRouter => Ok(Reply::Router { router: self.store.router.clone() }),
+            Command::SetRouter { router } => {
+                self.store.set_router(router.clone()).map_err(|error| CommandError::Host {
+                    message: format!("could not save router.json: {error}"),
+                })?;
+                broadcast(
+                    &mut self.inner.lock().expect("hub lock"),
+                    &Event::RouterChanged { router },
+                );
+                Ok(Reply::Done)
             }
             Command::PublishWorkflow { workflow } => self.publish(workflow),
             other => unreachable!("not an engine command: {other:?}"),
@@ -716,27 +735,9 @@ impl Engine {
         Ok(self.inner.lock().expect("hub lock").state.workflow(workflow)?.clone())
     }
 
-    /// The CLIs installed on `host`, found once with `command -v`.
+    /// The CLIs installed on `host` that the user has not switched off.
     fn providers(&mut self, host: &Host) -> Vec<ProviderKind> {
-        self.providers
-            .entry(host.clone())
-            .or_insert_with(|| {
-                let names = ProviderKind::ALL.map(ProviderKind::executable).join(" ");
-                // `command -v` exits non-zero if any is missing but still prints the others.
-                let found = HostCommand::new("sh")
-                    .args(["-c", &format!("command -v {names}; true")])
-                    .run(host)
-                    .unwrap_or_default();
-                ProviderKind::ALL
-                    .into_iter()
-                    .filter(|provider| {
-                        found
-                            .lines()
-                            .any(|line| line.rsplit('/').next() == Some(provider.executable()))
-                    })
-                    .collect()
-            })
-            .clone()
+        self.store.router.usable(&self.providers.installed(host))
     }
 }
 

@@ -3635,6 +3635,8 @@ dependencies = [
  "maestro-core",
  "maestro-daemon",
  "maestro-protocol",
+ "serde",
+ "serde_json",
  "sys-locale",
 ]
 

@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentRole, AgentSpec, NodeId, PermissionRequest, ToolCall, Workflow,
-    WorkflowId,
+    AgentEvent, AgentId, AgentRole, AgentSpec, Host, NodeId, PermissionRequest, ProviderKind,
+    ProviderStatus, Router, SetupAction, ToolCall, Workflow, WorkflowId,
 };
-use maestro_protocol::{AgentStatus, AgentSummary, Command, Event, Reply};
+use maestro_protocol::{AgentStatus, AgentSummary, Command, Event, Reply, SetupProgress};
 
 use crate::{Client, ClientError};
 
@@ -26,6 +26,26 @@ pub struct Mirror {
     pub plans: BTreeMap<AgentId, Vec<WorkflowId>>,
     /// Things that went wrong or finished outside any one transcript, oldest first.
     pub notices: Vec<Notice>,
+    /// The router's settings.
+    pub router: Router,
+    /// Each provider's CLI on each host, as last looked up ([`Mirror::set_providers`]) or as
+    /// an install or update left it.
+    pub providers: BTreeMap<(Host, ProviderKind), ProviderStatus>,
+    /// The last install or update of each provider's CLI on each host.
+    pub setups: BTreeMap<(Host, ProviderKind), Setup>,
+}
+
+/// An install or update of a provider's CLI, as far as it has gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Setup {
+    /// Install, or update.
+    pub action: SetupAction,
+    /// The script it runs.
+    pub script: String,
+    /// What the script has written, oldest first.
+    pub lines: Vec<String>,
+    /// Whether it succeeded, once it has ended.
+    pub finished: Option<bool>,
 }
 
 /// One agent as a frontend sees it.
@@ -88,6 +108,9 @@ impl Mirror {
                 mirror.workflows.insert(workflow.id, workflow);
             }
         }
+        if let Reply::Router { router } = client.request(Command::GetRouter)? {
+            mirror.router = router;
+        }
         let Reply::Agents { agents } = client.request(Command::ListAgents)? else {
             return Err(ClientError::Disconnected);
         };
@@ -143,7 +166,53 @@ impl Mirror {
                     view.apply(event);
                 }
             }
+            Event::RouterChanged { router } => self.router = router.clone(),
+            Event::ProviderSetup { host, provider, progress } => {
+                let key = (host.clone(), *provider);
+                match progress {
+                    SetupProgress::Started { action, script } => {
+                        let setup = Setup {
+                            action: *action,
+                            script: script.clone(),
+                            lines: Vec::new(),
+                            finished: None,
+                        };
+                        self.setups.insert(key.clone(), setup);
+                        if let Some(status) = self.providers.get_mut(&key) {
+                            status.setup = Some(*action);
+                        }
+                    }
+                    SetupProgress::Output { line } => {
+                        if let Some(setup) = self.setups.get_mut(&key) {
+                            setup.lines.push(line.clone());
+                        }
+                    }
+                    SetupProgress::Finished { ok, status } => {
+                        if let Some(setup) = self.setups.get_mut(&key) {
+                            setup.finished = Some(*ok);
+                        }
+                        self.providers.insert(key, status.clone());
+                    }
+                }
+            }
         }
+    }
+
+    /// Takes in the answer to [`Command::ListProviders`] for `host`.
+    pub fn set_providers(&mut self, host: &Host, providers: Vec<ProviderStatus>) {
+        for status in providers {
+            self.providers.insert((host.clone(), status.provider), status);
+        }
+    }
+
+    /// A provider's CLI on `host`, if it has been looked up.
+    pub fn provider(&self, host: &Host, provider: ProviderKind) -> Option<&ProviderStatus> {
+        self.providers.get(&(host.clone(), provider))
+    }
+
+    /// The last install or update of a provider's CLI on `host`.
+    pub fn setup(&self, host: &Host, provider: ProviderKind) -> Option<&Setup> {
+        self.setups.get(&(host.clone(), provider))
     }
 
     /// The commanders, oldest first.

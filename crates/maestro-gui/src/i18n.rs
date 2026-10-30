@@ -1,14 +1,16 @@
 //! The window's words, in English or Japanese.
 //!
-//! The language is chosen once, before the window opens: `--lang en|ja`, then `MAESTRO_LANG`,
-//! then the system's language. Each string is written in place as an English and a Japanese
-//! pair, with [`tr`] for fixed text and [`trf!`](crate::trf) for formatted text, and is looked
-//! up as the view draws, so nothing holds on to a translated copy.
+//! The language is chosen before the window opens: `--lang en|ja`, then the one picked in
+//! Settings ([`crate::prefs`]), then `MAESTRO_LANG`, then the system's language. Settings can
+//! change it while the window is open. Each string is written in place as an English and a
+//! Japanese pair, with [`tr`] for fixed text and [`trf!`](crate::trf) for formatted text, and is
+//! looked up as the view draws, so nothing holds on to a translated copy and a change shows at
+//! the next frame.
 //!
 //! What the daemon and the agents say is shown as it comes; only the window's own chrome is
 //! translated here.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use maestro_core::{Difficulty, Effort};
 
@@ -33,23 +35,39 @@ impl Lang {
             _ => None,
         }
     }
+
+    /// The tag [`Lang::from_tag`] reads back.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Ja => "ja",
+        }
+    }
 }
 
-static LANG: OnceLock<Lang> = OnceLock::new();
+/// The language in use: 0 before it is first looked up, else 1 for English and 2 for Japanese.
+static LANG: AtomicU8 = AtomicU8::new(0);
 
-/// Fixes the language for the rest of the run. Only the first call counts, so it must come
-/// before anything is drawn.
+/// Switches the language. What is drawn after this speaks it.
 pub fn set(lang: Lang) {
-    let _ = LANG.set(lang);
+    LANG.store(lang as u8 + 1, Ordering::Relaxed);
 }
 
 /// The language the window speaks: the one [`set`] chose, or else the environment's.
 pub fn lang() -> Lang {
-    *LANG.get_or_init(detect)
+    match LANG.load(Ordering::Relaxed) {
+        1 => Lang::En,
+        2 => Lang::Ja,
+        _ => {
+            let lang = detect();
+            set(lang);
+            lang
+        }
+    }
 }
 
 /// The language from `MAESTRO_LANG`, then from the system; English when neither is Japanese.
-fn detect() -> Lang {
+pub fn detect() -> Lang {
     std::env::var("MAESTRO_LANG")
         .ok()
         .and_then(|tag| Lang::from_tag(&tag))

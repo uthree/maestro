@@ -2,7 +2,7 @@
 //!
 //! [`State`] applies the workflow [`Command`]s and reports what changed; it is plain data and has
 //! no threads, so it is tested directly. The runtime handles the commands with side effects
-//! (agents, worktrees, pull requests), each on its own thread. [`Hub`] puts both behind one front
+//! (agents, worktrees, pull requests, installing the agent CLIs), each on its own thread. [`Hub`] puts both behind one front
 //! and serves it over any byte stream: stdio, a Unix socket for the resident daemon, or an
 //! in-memory pipe in tests. Every connection gets every [`Event`], whoever caused it.
 //!
@@ -10,6 +10,7 @@
 //! [`Event`]: maestro_protocol::Event
 
 mod engine;
+mod providers;
 pub mod resident;
 mod runtime;
 mod snapshot;
@@ -29,6 +30,7 @@ use maestro_protocol::{
 };
 
 use engine::Job;
+use providers::Providers;
 use runtime::Runtime;
 use snapshot::Snapshot;
 pub use state::State;
@@ -45,6 +47,7 @@ const SAVE_EVERY: Duration = Duration::from_secs(1);
 pub struct Hub {
     inner: Arc<Mutex<Inner>>,
     runtime: Arc<Runtime>,
+    providers: Arc<Providers>,
     engine: Sender<Job>,
 }
 
@@ -135,8 +138,13 @@ impl Hub {
         runtime.brief_with(Box::new(move || {
             maestro_core::status_report(&shared.lock().expect("hub lock").state.workflows())
         }));
-        let engine = engine::spawn(Arc::clone(&inner), Arc::clone(&runtime), store);
-        Self { inner, runtime, engine }
+        let shared = Arc::clone(&inner);
+        let providers = Providers::new(Arc::new(move |event| {
+            broadcast(&mut shared.lock().expect("hub lock"), &event);
+        }));
+        let engine =
+            engine::spawn(Arc::clone(&inner), Arc::clone(&runtime), Arc::clone(&providers), store);
+        Self { inner, runtime, providers, engine }
     }
 
     /// Serves one connection until its reader ends, then returns.
@@ -200,6 +208,15 @@ impl Hub {
                 let outgoing = outgoing.clone();
                 thread::spawn(move || {
                     let result = runtime.execute(command);
+                    outgoing.send(ServerMessage::Response { id, result }).ok();
+                });
+                continue;
+            }
+            if Providers::handles(&command) {
+                let providers = Arc::clone(&self.providers);
+                let outgoing = outgoing.clone();
+                thread::spawn(move || {
+                    let result = providers.execute(command);
                     outgoing.send(ServerMessage::Response { id, result }).ok();
                 });
                 continue;
