@@ -1,7 +1,7 @@
 //! Everything around the conversation: the sidebar, the workflow pane that opens beside it with
 //! its canvas and inspector, and the screens shown before the daemon answers.
 
-use atelier::agent::{Composer, ConversationRow};
+use atelier::agent::Composer;
 use atelier::{
     ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, Edge, EmptyState, IconName,
     Label, ListItem, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner, Switch, Tabs,
@@ -15,9 +15,10 @@ use maestro_core::{
 };
 
 use crate::app::{Maestro, Progress};
-use crate::chat::{agent_status, conversation_title, provider_logo};
+use crate::chat::provider_logo;
 use crate::graph::{model_label, status_label, status_tone};
 use crate::i18n::{self, tr};
+use crate::project::{host_label, project_summary, resource_label};
 use crate::{input, link, trf};
 
 /// The inspector's width beside the canvas.
@@ -39,73 +40,89 @@ impl Maestro {
             .child(Label::caption(label))
     }
 
+    /// The projects, with the open project's workflows under it.
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let conversations: Vec<_> = self
-            .mirror
-            .commanders()
-            .rev()
-            .map(|(id, view)| {
-                let status = agent_status(view.status, !view.transcript.entries.is_empty());
-                let plans = self.mirror.plans.get(&id).map_or(0, Vec::len);
-                let time = match plans {
-                    0 => i18n::agent_status(status).to_string(),
-                    1 => tr("1 plan", "計画 1 件").into(),
-                    plans => trf!("{plans} plans", "計画 {plans} 件"),
-                };
-                ConversationRow::new(
-                    ("conversation", id.0 as usize),
-                    conversation_title(view),
-                    time,
-                )
-                .status(status)
-                .selected(self.conversation == Some(id))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.conversation = Some(id);
-                    this.workflow_full = false;
-                    cx.notify();
-                }))
-                .into_any_element()
-            })
-            .collect();
-        let workflows: Vec<_> = self
-            .mirror
-            .workflows
-            .values()
-            .rev()
-            .map(|flow| {
-                let id = flow.id;
-                let total = flow.nodes().count();
-                let done = flow.nodes().filter(|node| node.status == NodeStatus::Succeeded).count();
-                let attention = flow.nodes().any(|node| {
-                    matches!(node.status, NodeStatus::AwaitingUser | NodeStatus::Failed)
-                });
-                ListItem::new(("workflow", id.0 as usize), flow.title.clone())
-                    .icon(if attention { IconName::Alert } else { IconName::Sliders })
-                    .when(attention, |item| item.icon_color(theme.colors.warning))
-                    .description(match total {
-                        0 => tr("No steps", "ステップなし").to_string(),
-                        _ => trf!("{done} of {total} steps done", "{total} ステップ中 {done} 完了"),
+        let mut rows = Vec::new();
+        for project in self.mirror.projects.values().rev() {
+            let id = project.id;
+            let open = self.project == Some(id);
+            let flows: Vec<_> = self.mirror.workflows_of(id).rev().collect();
+            let waiting = flows.iter().any(|flow| Progress::of(flow).waiting > 0);
+            let working = project
+                .commander
+                .and_then(|agent| self.mirror.agents.get(&agent))
+                .is_some_and(|view| view.transcript.busy);
+            rows.push(
+                ListItem::new(("project", id.0 as usize), project.name.clone())
+                    .icon(if waiting { IconName::Alert } else { IconName::Folder })
+                    .when(waiting, |item| item.icon_color(theme.colors.warning))
+                    .description(if working {
+                        tr("The commander is working", "コマンダーが作業中").to_string()
+                    } else {
+                        project_summary(
+                            project
+                                .resources
+                                .iter()
+                                .filter(|entry| {
+                                    !matches!(
+                                        entry.resource,
+                                        maestro_core::Resource::Provider { .. }
+                                    )
+                                })
+                                .count(),
+                            flows.len(),
+                        )
                     })
-                    .selected(self.workflow_open && self.workflow == Some(id))
+                    .selected(open && !self.workflow_open)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_workflow(id);
+                        this.enter_project(id);
+                        this.workflow_open = false;
+                        this.workflow_full = false;
                         cx.notify();
                     }))
-                    .into_any_element()
-            })
-            .collect();
-        let no_conversations = conversations.is_empty();
-        let no_workflows = workflows.is_empty();
+                    .into_any_element(),
+            );
+            if !open {
+                continue;
+            }
+            for flow in flows {
+                let workflow = flow.id;
+                let progress = Progress::of(flow);
+                let attention = progress.waiting > 0 || progress.failed > 0;
+                rows.push(
+                    ListItem::new(("workflow", workflow.0 as usize), flow.title.clone())
+                        .indent(1)
+                        .icon(if attention { IconName::Alert } else { IconName::Sliders })
+                        .when(attention, |item| item.icon_color(theme.colors.warning))
+                        .description(match progress.total {
+                            0 => tr("No steps", "ステップなし").to_string(),
+                            total => trf!(
+                                "{} of {total} steps done",
+                                "{total} ステップ中 {} 完了",
+                                progress.done
+                            ),
+                        })
+                        .selected(self.workflow_open && self.workflow == Some(workflow))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_workflow(workflow);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        let none = rows.is_empty();
+        let has_project = self.project.is_some();
         Sidebar::new(Edge::Left)
             .w(px(crate::app::SIDEBAR_WIDTH))
             .p(theme.spacing.sm)
             .gap(theme.spacing.xxs)
             .child(
-                Button::new("new-conversation", tr("New conversation", "新しい会話"))
+                Button::new("new-project", tr("New project", "新しいプロジェクト"))
                     .icon(IconName::Plus)
                     .full_width()
-                    .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.new_project(cx))),
             )
             .child(
                 div()
@@ -116,17 +133,6 @@ impl Maestro {
                     .min_h_0()
                     .overflow_y_scroll()
                     .gap(theme.spacing.xxs)
-                    .child(self.caption(tr("Conversations", "会話"), cx))
-                    .children(conversations)
-                    .when(no_conversations, |list| {
-                        list.child(
-                            div().px(theme.spacing.sm).child(
-                                Label::new(tr("Nothing yet", "まだありません"))
-                                    .size(TextSize::XSmall)
-                                    .color(TextColor::Faint),
-                            ),
-                        )
-                    })
                     .child(
                         div()
                             .flex()
@@ -134,22 +140,31 @@ impl Maestro {
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(self.caption(tr("Workflows", "ワークフロー"), cx)),
+                                    .child(self.caption(tr("Projects", "プロジェクト"), cx)),
                             )
-                            .child(
-                                Button::icon_only("new-workflow", IconName::Plus)
-                                    .size(ControlSize::Small)
-                                    .tooltip(tr("New empty workflow", "空のワークフローを作成"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
-                            ),
+                            .when(has_project, |row| {
+                                row.child(
+                                    Button::icon_only("new-workflow", IconName::Plus)
+                                        .size(ControlSize::Small)
+                                        .tooltip(tr(
+                                            "New empty workflow in this project",
+                                            "このプロジェクトに空のワークフローを作成",
+                                        ))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.new_workflow(cx)),
+                                        ),
+                                )
+                            }),
                     )
-                    .children(workflows)
-                    .when(no_workflows, |list| {
+                    .children(rows)
+                    .when(none, |list| {
                         list.child(
                             div().px(theme.spacing.sm).child(
                                 Label::new(tr(
-                                    "Plans the commander writes appear here",
-                                    "コマンダーが書いた計画がここに表示されます",
+                                    "A project gathers the repositories, machines and AI \
+                                     providers one commander works with",
+                                    "プロジェクトには、1 体のコマンダーが使うリポジトリ・\
+                                     マシン・AI プロバイダをまとめます",
                                 ))
                                 .size(TextSize::XSmall)
                                 .color(TextColor::Faint),
@@ -157,52 +172,6 @@ impl Maestro {
                         )
                     }),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme.spacing.xxs)
-                    .p(theme.spacing.sm)
-                    .border_t_1()
-                    .border_color(theme.colors.separator)
-                    .child(
-                        Label::new(tr("Repository", "リポジトリ"))
-                            .size(TextSize::XSmall)
-                            .color(TextColor::Faint),
-                    )
-                    .child(
-                        Label::new(match &self.project.repository {
-                            Some(path) => path.display().to_string(),
-                            None => tr("Not chosen", "未選択").into(),
-                        })
-                        .size(TextSize::Small)
-                        .mono()
-                        .truncate(),
-                    ),
-            )
-    }
-
-    /// The repository and base branch fields.
-    pub(crate) fn project_fields(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let place = link::describe(&self.launch);
-        let field = |label: String, state| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(theme.spacing.xs)
-                .child(Label::new(label).size(TextSize::Small).color(TextColor::Muted))
-                .child(TextField::new().child(input::editor(state)))
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.spacing.md)
-            .child(field(
-                trf!("Repository on {place}", "{place}上のリポジトリ"),
-                &self.fields.repository,
-            ))
-            .child(field(tr("Base branch", "ベースブランチ").into(), &self.fields.base))
     }
 
     pub(crate) fn connecting(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -840,8 +809,57 @@ impl Maestro {
         let done = flow.nodes().filter(|node| node.status == NodeStatus::Succeeded).count();
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
         let target = flow.target.as_ref().map(|target| {
-            trf!("{} from {}", "{}（{} から）", target.repository.display(), target.base)
+            trf!(
+                "{} on {}, from {}",
+                "{}（{}・{} から）",
+                target.repository.display(),
+                host_label(&target.host),
+                target.base
+            )
         });
+        let workflow = flow.id;
+        // Every place the project offers: each folder on its machine, and each GitHub
+        // repository on the daemon's machine and on each of the project's machines.
+        let mut places = Vec::new();
+        if let Some(project) = flow.project.and_then(|id| self.mirror.projects.get(&id)) {
+            let machines: Vec<_> = project
+                .resources
+                .iter()
+                .filter_map(|entry| match &entry.resource {
+                    maestro_core::Resource::Machine { destination } => {
+                        Some((entry.id, destination.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for entry in project.resources.iter().filter(|entry| entry.resource.is_repository()) {
+                let (label, line) = resource_label(&entry.resource);
+                let github = matches!(entry.resource, maestro_core::Resource::GitHub { .. });
+                let mut choices = vec![(None, line)];
+                if github {
+                    choices[0].1 =
+                        trf!("{} on the daemon's machine", "{}・デーモンのマシン", choices[0].1);
+                    for (machine, destination) in &machines {
+                        let line = trf!("GitHub, on {destination}", "GitHub・{destination}");
+                        choices.push((Some(*machine), line));
+                    }
+                }
+                for (machine, line) in choices {
+                    let resource = entry.id;
+                    let index = places.len();
+                    places.push(
+                        ListItem::new(("place", index), label.clone())
+                            .icon(if github { IconName::Code } else { IconName::Folder })
+                            .description(line)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.place(workflow, resource, machine, cx)
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let no_places = places.is_empty();
         let steps: Vec<_> = flow
             .topological_order()
             .into_iter()
@@ -882,25 +900,33 @@ impl Maestro {
                     .child(
                         Label::new(target.unwrap_or_else(|| {
                             tr(
-                                "Not set; Run uses the project below",
-                                "未設定。実行時は下のプロジェクトを使います",
+                                "Not chosen yet. Run uses the project's only repository; pick one \
+                                 below when it has several.",
+                                "未選択です。リポジトリが 1 つだけなら実行時にそれを使います。\
+                                 複数あるときは下から選んでください。",
                             )
                             .into()
                         }))
                         .size(TextSize::Small)
                         .color(TextColor::Muted),
                     )
-                    .child(self.project_fields(cx))
-                    .child(
-                        div().flex().child(
-                            Button::new(
-                                "use-project",
-                                tr("Use for this workflow", "このワークフローに使う"),
-                            )
-                            .size(ControlSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.save_project_target(cx))),
-                        ),
-                    )
+                    .when(!no_places, |column| {
+                        column.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(theme.spacing.xxs)
+                                .child(
+                                    Label::new(tr(
+                                        "Run it in one of the project's repositories",
+                                        "プロジェクトのリポジトリから選ぶ",
+                                    ))
+                                    .size(TextSize::XSmall)
+                                    .color(TextColor::Faint),
+                                )
+                                .children(places),
+                        )
+                    })
                     .child(
                         Switch::new("publish", publish)
                             .label(tr(

@@ -11,6 +11,9 @@
 //! on this machine from this same executable (`maestro --stdio`, `maestro serve`), so it starts
 //! by itself and always speaks this window's protocol.
 //!
+//! The window opens a project: the one with `--repo` among its folders, made if there is none,
+//! or else the newest.
+//!
 //! The window speaks English or Japanese: `--lang`, else `MAESTRO_LANG`, else the system's
 //! language.
 
@@ -21,6 +24,7 @@ mod i18n;
 mod input;
 mod link;
 mod panels;
+mod project;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,7 +35,7 @@ use gpui::{
 };
 use maestro_client::Launch;
 
-use crate::app::{Maestro, Project};
+use crate::app::{Maestro, Start};
 
 /// The smallest window the layout fits without cutting off controls.
 const MIN_SIZE: (f32, f32) = (900., 600.);
@@ -76,7 +80,7 @@ fn main() -> ExitCode {
         i18n::set(lang);
     }
     let launch = launch();
-    let project = Project::new(
+    let start = Start::new(
         argument("--repo").map(PathBuf::from),
         argument("--base").unwrap_or_else(|| "main".into()),
     );
@@ -115,7 +119,7 @@ fn main() -> ExitCode {
         );
         cx.open_window(options, |window, cx| {
             atelier::set_window_background(window, &Theme::new(direction, appearance));
-            let view = cx.new(|cx| Maestro::new(launch, project, window, cx));
+            let view = cx.new(|cx| Maestro::new(launch, start, window, cx));
             // gpui-component's text input finds its window through a `Root` at the top. Its
             // own frame only draws for client-side decorations, which Atelier asks for on
             // Linux alone; on macOS and Windows it is a plain container.

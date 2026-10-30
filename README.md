@@ -32,6 +32,12 @@ On this machine the daemon is part of the `maestro` executable and starts by its
 nothing else to build, start or stop. With `--ssh`, the server needs `maestro-daemon` installed
 (see below).
 
+Work is organised in projects, listed in the sidebar. A project holds the resources its one
+commander may use: GitHub repositories, folders on a machine, SSH machines, and the AI providers
+its work may run on (the folder button in the title bar opens them). The commander picks which
+repository and machine each plan runs in, and asks you when that is unclear. `--repo` opens the
+project with that folder, creating it if there is none.
+
 Ask the commander what to build in the conversation in the middle of the window. Its plan
 appears in the conversation as a card listing the steps, with Run beside it. "Open workflow"
 opens the plan as a graph beside the conversation (or in its place, on a narrow window or with

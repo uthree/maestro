@@ -6,8 +6,8 @@ use atelier::agent::{
     ToolCall, ToolGroup, UserMessage,
 };
 use atelier::{
-    ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, CopyButton, IconName,
-    ProviderLogo, SectionHeader, StepList, StepState, Tone,
+    ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, CopyButton, IconName, Label,
+    ProviderLogo, SectionHeader, StepList, StepState, TextColor, TextSize, Tone,
 };
 use gpui::{
     AnyElement, Context, ElementId, IntoElement, ParentElement, SharedString, Styled, div,
@@ -34,20 +34,6 @@ pub fn agent_status(status: AgentStatus, has_history: bool) -> atelier::agent::A
         AgentStatus::Idle if has_history => Shown::Completed,
         AgentStatus::Idle => Shown::Idle,
         AgentStatus::Exited => Shown::Failed,
-    }
-}
-
-/// A conversation's name: the start of its first message.
-pub fn conversation_title(view: &AgentView) -> String {
-    let first = view.transcript.entries.iter().find_map(|entry| match entry {
-        Entry::User(text) => Some(text.as_str()),
-        _ => None,
-    });
-    let Some(first) = first else { return tr("New conversation", "新しい会話").into() };
-    let line = first.lines().next().unwrap_or_default();
-    match line.char_indices().nth(48) {
-        Some((end, _)) => format!("{}…", &line[..end]),
-        None => line.into(),
     }
 }
 
@@ -404,19 +390,99 @@ impl Maestro {
                      ありません。",
                 ),
             ))
-            .when(self.project.repository.is_none(), |empty| empty.child(self.project_fields(cx)))
+            .child(self.project_note(cx))
+            .when(self.project.is_some(), |column| {
+                column.child(
+                    div().flex().child(
+                        Button::new(
+                            "greeting-empty",
+                            tr("Start from an empty workflow", "空のワークフローから始める"),
+                        )
+                        .ghost()
+                        .icon(IconName::Plus)
+                        .size(ControlSize::Small)
+                        .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
+                    ),
+                )
+            })
+    }
+
+    /// Under the greeting: what the open project holds, or how to make one.
+    fn project_note(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let Some(project) = self.open_project() else {
+            return div()
+                .flex()
+                .child(
+                    Button::new("greeting-project", tr("New project", "新しいプロジェクト"))
+                        .primary()
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(|this, _, _, cx| this.new_project(cx))),
+                )
+                .into_any_element();
+        };
+        let rows: Vec<_> = project
+            .resources
+            .iter()
+            .filter(|entry| !matches!(entry.resource, maestro_core::Resource::Provider { .. }))
+            .map(|entry| {
+                let (label, line) = crate::project::resource_label(&entry.resource);
+                Label::new(format!("{label} · {line}"))
+                    .size(TextSize::Small)
+                    .color(TextColor::Muted)
+                    .truncate()
+                    .into_any_element()
+            })
+            .collect();
+        let providers = self.allowed_providers();
+        let providers = if providers.len() == ProviderKind::ALL.len() {
+            tr("Any AI provider", "すべての AI プロバイダ").to_string()
+        } else {
+            providers.iter().map(|provider| provider.label()).collect::<Vec<_>>().join(", ")
+        };
+        let empty = rows.is_empty();
+        Card::new()
+            .p(theme.spacing.md)
+            .gap(theme.spacing.sm)
             .child(
-                div().flex().child(
-                    Button::new(
-                        "greeting-empty",
-                        tr("Start from an empty workflow", "空のワークフローから始める"),
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div().flex_1().child(Label::caption(tr(
+                            "What this project's commander works with",
+                            "このプロジェクトのコマンダーが使うもの",
+                        ))),
                     )
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .size(ControlSize::Small)
-                    .on_click(cx.listener(|this, _, _, cx| this.new_workflow(cx))),
-                ),
+                    .child(
+                        Button::new("greeting-resources", tr("Edit", "編集"))
+                            .ghost()
+                            .icon(IconName::Folder)
+                            .size(ControlSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.resources_open {
+                                    this.toggle_resources(cx);
+                                }
+                            })),
+                    ),
             )
+            .children(rows)
+            .when(empty, |card| {
+                card.child(
+                    Label::new(tr(
+                        "No repository or folder yet. Add one so plans can run.",
+                        "リポジトリもフォルダもまだありません。計画を実行するには追加してください。",
+                    ))
+                    .size(TextSize::Small)
+                    .color(TextColor::Warning),
+                )
+            })
+            .child(
+                Label::new(trf!("Workers: {providers}", "ワーカー: {providers}"))
+                    .size(TextSize::Small)
+                    .color(TextColor::Muted),
+            )
+            .into_any_element()
     }
 
     /// The conversation with the commander: its transcript, the plans it wrote, and the
@@ -426,7 +492,8 @@ impl Maestro {
         let view = self
             .conversation
             .and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?.clone())));
-        let provider = view.as_ref().map_or(self.provider, |(_, view)| view.spec.model.provider);
+        let provider =
+            view.as_ref().map_or(self.commander_provider(), |(_, view)| view.spec.model.provider);
         let busy = view.as_ref().is_some_and(|(_, view)| view.transcript.busy);
         let fresh = view.is_none();
 
@@ -463,10 +530,12 @@ impl Maestro {
             .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
             .when(fresh, |composer| {
                 // The provider is fixed once the conversation starts.
+                // Only the providers the project allows.
                 composer.on_model(cx.listener(|this, _, _, cx| {
-                    let index = ProviderKind::ALL.iter().position(|kind| *kind == this.provider);
-                    this.provider =
-                        ProviderKind::ALL[(index.unwrap_or(0) + 1) % ProviderKind::ALL.len()];
+                    let allowed = this.allowed_providers();
+                    let current = this.commander_provider();
+                    let index = allowed.iter().position(|kind| *kind == current).unwrap_or(0);
+                    this.provider = allowed[(index + 1) % allowed.len()];
                     cx.notify();
                 }))
             });
