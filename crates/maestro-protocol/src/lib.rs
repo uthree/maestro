@@ -14,7 +14,7 @@ use std::io::{self, BufRead, Write};
 
 use maestro_core::{
     AgentEvent, AgentId, AgentSpec, Choice, Difficulty, Host, ModelChoice, NodeDraft, NodeEdit,
-    NodeId, Workflow, WorkflowId, WorkflowTarget, Workspace,
+    NodeId, NodeRef, Workflow, WorkflowId, WorkflowTarget, Workspace,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -79,6 +79,25 @@ pub enum Command {
         /// The dependent.
         to: NodeId,
     },
+    /// Makes a node wait for a node of an earlier workflow as well, as the commander does when
+    /// new work builds on work still under way.
+    WaitFor {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// The node that waits.
+        node: NodeId,
+        /// The node it waits for.
+        on: NodeRef,
+    },
+    /// Stops a node waiting for a node of another workflow.
+    StopWaiting {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// The node that waits.
+        node: NodeId,
+        /// The node it waited for.
+        on: NodeRef,
+    },
     /// Sets where a workflow's workers run. Needed before [`Command::RunWorkflow`].
     SetWorkflowTarget {
         /// Which workflow.
@@ -96,7 +115,9 @@ pub enum Command {
         edit: NodeEdit,
     },
     /// Starts every node whose dependencies have succeeded, and keeps starting nodes as others
-    /// succeed. Running a running workflow again restarts only what is ready and not running.
+    /// succeed, in this workflow or in the earlier ones its nodes wait on. Running a running
+    /// workflow again restarts only what is ready and not running. A commander's plan with a
+    /// target runs without this.
     RunWorkflow {
         /// Which workflow.
         workflow: WorkflowId,
@@ -121,7 +142,9 @@ pub enum Command {
         rating: u8,
     },
     /// Starts a commander: an agent that converses with the user and writes plans, which become
-    /// new workflows. The user talks to it with [`Command::SendToAgent`].
+    /// new workflows and start at once when it has a target. The user talks to it with
+    /// [`Command::SendToAgent`]; each message reaches it after a status report of the work under
+    /// way when that has changed, so new work can wait on what is still running.
     StartCommander {
         /// The model it runs on.
         model: ModelChoice,
@@ -160,8 +183,9 @@ pub enum Command {
         /// Which agent.
         agent: AgentId,
     },
-    /// Sends the next message to an agent between turns. This is also how a user writes to a
-    /// workflow node directly.
+    /// Sends the next message to an agent. Sent during a turn, it waits for the turn to end
+    /// ([`AgentEvent::Queued`]), so the user can write while the agent works. This is also how a
+    /// user writes to a workflow node directly.
     SendToAgent {
         /// Which agent.
         agent: AgentId,

@@ -183,6 +183,8 @@ pub struct Transcript {
     pub entries: Vec<Entry>,
     /// Whether a turn is under way.
     pub busy: bool,
+    /// Messages sent during a turn, oldest first, which the agent gets once the turn ends.
+    pub queued: Vec<String>,
     /// Where the current turn's entries start.
     turn: usize,
 }
@@ -245,7 +247,11 @@ impl Transcript {
     pub fn apply(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::Started => {}
+            AgentEvent::Queued { text } => self.queued.push(text.clone()),
             AgentEvent::Prompted { text } => {
+                if let Some(index) = self.queued.iter().position(|queued| queued == text) {
+                    self.queued.remove(index);
+                }
                 self.close_permissions(true);
                 self.busy = true;
                 self.turn = self.entries.len();
@@ -315,6 +321,7 @@ impl Transcript {
             AgentEvent::Exited { reason } => {
                 self.close_permissions(false);
                 self.busy = false;
+                self.queued.clear();
                 self.finish_turn();
                 self.entries.push(Entry::Exited(reason.clone()));
             }
@@ -456,6 +463,21 @@ mod tests {
         transcript.apply(&AgentEvent::Text { text: "Hello again".into() });
         transcript.apply(&AgentEvent::TurnCompleted { answer: "Hello again".into() });
         assert_eq!(transcript.entries.len(), 4);
+    }
+
+    #[test]
+    fn a_message_sent_during_a_turn_waits_for_the_turn_to_end() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&AgentEvent::Prompted { text: "Plan it".into() });
+        transcript.apply(&AgentEvent::Text { text: "Working on".into() });
+        transcript.apply(&AgentEvent::Queued { text: "Also this".into() });
+        transcript.apply(&AgentEvent::Text { text: " it".into() });
+        assert_eq!(transcript.queued, ["Also this"]);
+        assert_eq!(transcript.last_answer(), Some("Working on it"));
+        transcript.apply(&AgentEvent::TurnCompleted { answer: "Working on it".into() });
+        transcript.apply(&AgentEvent::Prompted { text: "Also this".into() });
+        assert!(transcript.queued.is_empty());
+        assert_eq!(transcript.entries.last(), Some(&Entry::User("Also this".into())));
     }
 
     #[test]

@@ -54,6 +54,12 @@ pub enum AgentEvent {
         /// The message.
         text: String,
     },
+    /// A message was sent while the agent was in a turn. Maestro holds it and sends it when the
+    /// turn ends, reporting [`AgentEvent::Prompted`] then.
+    Queued {
+        /// The message.
+        text: String,
+    },
     /// Part of the reply the user reads.
     Text {
         /// The new text.

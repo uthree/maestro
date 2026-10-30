@@ -4,13 +4,18 @@
 //! an [`Edge`] from `a` to `b` means `b` starts only once `a` has succeeded. The commander writes
 //! the first version; after that the user and the commander edit the same graph through the same
 //! operations, and every operation keeps it acyclic so the order of work is always defined.
+//!
+//! Work asked for later can wait on work already under way: a node may also wait on nodes of
+//! other workflows ([`Node::after`]), but only of earlier ones, so the graph of every workflow
+//! together stays acyclic too.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use std::path::PathBuf;
 
 use crate::id::{AgentId, NodeId, WorkflowId};
 use crate::provider::ModelChoice;
@@ -97,6 +102,39 @@ pub struct Node {
     /// The branch its work is committed on, once it has a worktree.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Nodes of earlier workflows that must succeed before this one starts. Their work is merged
+    /// into its worktree when they are in the same repository.
+    #[serde(default)]
+    pub after: Vec<NodeRef>,
+}
+
+/// A node named from outside its workflow, written `wf1/n2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NodeRef {
+    /// The workflow.
+    pub workflow: WorkflowId,
+    /// The node within it.
+    pub node: NodeId,
+}
+
+impl fmt::Display for NodeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.workflow, self.node)
+    }
+}
+
+impl FromStr for NodeRef {
+    type Err = ();
+
+    /// Reads `wf1/n2`.
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let (workflow, node) = text.trim().split_once('/').ok_or(())?;
+        let number = |text: &str, prefix: &str| text.strip_prefix(prefix)?.parse().ok();
+        Ok(Self {
+            workflow: WorkflowId(number(workflow, "wf").ok_or(())?),
+            node: NodeId(number(node, "n").ok_or(())?),
+        })
+    }
 }
 
 /// The repository a workflow's workers check out, and what happens to their work.
@@ -140,6 +178,10 @@ pub enum WorkflowError {
         /// Proposed dependent.
         to: NodeId,
     },
+    /// A node may wait only on nodes of earlier workflows, so that no loop can form through
+    /// other workflows.
+    #[error("{0} is not in an earlier workflow")]
+    NotEarlier(NodeRef),
 }
 
 /// A directed acyclic graph of work.
@@ -152,6 +194,9 @@ pub struct Workflow {
     pub title: String,
     /// Where its workers run; a workflow without one can be drawn and edited, not run.
     pub target: Option<WorkflowTarget>,
+    /// Whether it has been set going: its nodes then start by themselves as soon as what they
+    /// wait for has succeeded, including nodes of other workflows.
+    pub started: bool,
     nodes: BTreeMap<NodeId, Node>,
     edges: BTreeSet<Edge>,
     next_node: u64,
@@ -166,6 +211,8 @@ struct WorkflowRepr {
     title: String,
     #[serde(default)]
     target: Option<WorkflowTarget>,
+    #[serde(default)]
+    started: bool,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     next_node: u64,
@@ -177,6 +224,7 @@ impl From<WorkflowRepr> for Workflow {
             id: repr.id,
             title: repr.title,
             target: repr.target,
+            started: repr.started,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
             next_node: repr.next_node,
@@ -190,6 +238,7 @@ impl From<Workflow> for WorkflowRepr {
             id: flow.id,
             title: flow.title,
             target: flow.target,
+            started: flow.started,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
             next_node: flow.next_node,
@@ -204,6 +253,7 @@ impl Workflow {
             id,
             title: title.into(),
             target: None,
+            started: false,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),
             next_node: 1,
@@ -241,6 +291,7 @@ impl Workflow {
             status,
             agent: None,
             branch: None,
+            after: Vec::new(),
         };
         self.nodes.insert(id, node);
         id
@@ -266,6 +317,28 @@ impl Workflow {
         }
         self.edges.insert(Edge { from, to });
         Ok(())
+    }
+
+    /// Makes `id` wait for a node of an earlier workflow as well. Waiting twice on the same node
+    /// is not an error. Whether that node exists is for the caller to check: only the daemon
+    /// sees every workflow.
+    pub fn wait_for(&mut self, id: NodeId, on: NodeRef) -> Result<(), WorkflowError> {
+        if on.workflow >= self.id {
+            return Err(WorkflowError::NotEarlier(on));
+        }
+        let node = self.node_mut(id)?;
+        if !node.after.contains(&on) {
+            node.after.push(on);
+        }
+        Ok(())
+    }
+
+    /// Stops `id` waiting for a node of another workflow. Returns whether it was waiting.
+    pub fn stop_waiting(&mut self, id: NodeId, on: NodeRef) -> bool {
+        let Some(node) = self.nodes.get_mut(&id) else { return false };
+        let before = node.after.len();
+        node.after.retain(|other| *other != on);
+        node.after.len() != before
     }
 
     /// Removes a dependency. Returns whether it existed.
@@ -337,13 +410,15 @@ impl Workflow {
     }
 
     /// Pending nodes whose dependencies have all succeeded: the work that can start now.
-    pub fn ready(&self) -> Vec<NodeId> {
+    /// `succeeded` answers for the nodes of other workflows they wait on.
+    pub fn ready(&self, succeeded: impl Fn(NodeRef) -> bool) -> Vec<NodeId> {
         self.nodes
             .values()
             .filter(|node| node.status == NodeStatus::Pending)
             .filter(|node| {
                 self.dependencies(node.id)
                     .all(|dep| self.nodes[&dep].status == NodeStatus::Succeeded)
+                    && node.after.iter().all(|&other| succeeded(other))
             })
             .map(|node| node.id)
             .collect()
@@ -457,14 +532,14 @@ mod tests {
     #[test]
     fn ready_follows_success_but_not_failure() {
         let (mut flow, [a, b, c, d]) = diamond();
-        assert_eq!(flow.ready(), vec![a]);
+        assert_eq!(flow.ready(|_| true), vec![a]);
         flow.set_status(a, NodeStatus::Succeeded).unwrap();
-        assert_eq!(flow.ready(), vec![b, c]);
+        assert_eq!(flow.ready(|_| true), vec![b, c]);
         flow.set_status(b, NodeStatus::Succeeded).unwrap();
         flow.set_status(c, NodeStatus::Failed).unwrap();
-        assert!(flow.ready().is_empty());
+        assert!(flow.ready(|_| true).is_empty());
         flow.set_status(c, NodeStatus::Succeeded).unwrap();
-        assert_eq!(flow.ready(), vec![d]);
+        assert_eq!(flow.ready(|_| true), vec![d]);
     }
 
     #[test]
@@ -478,8 +553,32 @@ mod tests {
     }
 
     #[test]
+    fn waits_only_on_earlier_workflows_and_for_their_success() {
+        let (mut flow, [a, ..]) = diamond();
+        flow.id = WorkflowId(3);
+        let earlier: NodeRef = "wf2/n4".parse().unwrap();
+        assert_eq!(earlier, NodeRef { workflow: WorkflowId(2), node: NodeId(4) });
+        assert_eq!(earlier.to_string(), "wf2/n4");
+        assert!("wf2".parse::<NodeRef>().is_err() && "2/4".parse::<NodeRef>().is_err());
+
+        let later = NodeRef { workflow: WorkflowId(3), node: NodeId(1) };
+        assert_eq!(flow.wait_for(a, later), Err(WorkflowError::NotEarlier(later)));
+        flow.wait_for(a, earlier).unwrap();
+        flow.wait_for(a, earlier).unwrap();
+        assert_eq!(flow.node(a).unwrap().after, [earlier]);
+
+        assert!(flow.ready(|_| false).is_empty());
+        assert_eq!(flow.ready(|other| other == earlier), vec![a]);
+        assert!(flow.stop_waiting(a, earlier));
+        assert_eq!(flow.ready(|_| false), vec![a]);
+    }
+
+    #[test]
     fn round_trips_through_json() {
-        let (flow, _) = diamond();
+        let (mut flow, [a, ..]) = diamond();
+        flow.id = WorkflowId(2);
+        flow.started = true;
+        flow.wait_for(a, NodeRef { workflow: WorkflowId(1), node: NodeId(1) }).unwrap();
         let text = serde_json::to_string(&flow).unwrap();
         assert_eq!(serde_json::from_str::<Workflow>(&text).unwrap(), flow);
     }
