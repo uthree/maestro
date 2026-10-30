@@ -4,10 +4,12 @@
 use atelier::agent::Composer;
 use atelier::{
     ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, Edge, EmptyState, IconName,
-    Label, ListItem, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner, Switch, Tabs,
-    TextColor, TextField, TextSize, Tone,
+    Label, ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner,
+    Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
 };
-use gpui::{Context, IntoElement, ParentElement, Pixels, Styled, div, prelude::*, px};
+use gpui::{
+    Context, Corner, IntoElement, ParentElement, Pixels, Styled, Window, div, prelude::*, px,
+};
 use maestro_client::mirror::AgentView;
 use maestro_core::{
     AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeRef, NodeStatus,
@@ -16,6 +18,7 @@ use maestro_core::{
 
 use crate::app::{Maestro, Progress};
 use crate::chat::provider_logo;
+use crate::dropdown::{self, Menu};
 use crate::graph::{model_label, status_label, status_tone};
 use crate::i18n::{self, tr};
 use crate::project::{host_label, project_summary, resource_label};
@@ -26,9 +29,6 @@ pub const INSPECTOR_WIDTH: f32 = 360.;
 
 /// The inspector's height when it sits under the canvas.
 const INSPECTOR_HEIGHT: f32 = 340.;
-
-/// The providers a node can be pinned to, after "let the router choose".
-const RUNS_ON: [&str; 5] = ["Auto", "Claude", "Codex", "Antigravity", "OpenCode"];
 
 impl Maestro {
     fn caption(&self, label: &'static str, cx: &Context<Self>) -> impl IntoElement + use<> {
@@ -219,6 +219,7 @@ impl Maestro {
         &self,
         width: Pixels,
         full: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
@@ -332,7 +333,9 @@ impl Maestro {
                     .min_h_0()
                     .when(!beside, |body| body.flex_col())
                     .child(self.graph(cx))
-                    .when(inspect, |body| body.child(self.inspector(beside, inspector_width, cx))),
+                    .when(inspect, |body| {
+                        body.child(self.inspector(beside, inspector_width, window, cx))
+                    }),
             )
             .into_any_element()
     }
@@ -343,6 +346,7 @@ impl Maestro {
         &self,
         beside: bool,
         width: Pixels,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
@@ -364,7 +368,7 @@ impl Maestro {
                 let reply = node.agent == Some(agent);
                 self.worker(agent, &view, width, reply, cx).into_any_element()
             }
-            Some(node) => self.node_details(node, cx).into_any_element(),
+            Some(node) => self.node_details(node, window, cx).into_any_element(),
             None => self.overview(cx).into_any_element(),
         };
         let tabs = worker.is_some().then(|| {
@@ -406,9 +410,50 @@ impl Maestro {
         }
     }
 
+    /// What a node can be pinned to: the router's choice, or one provider.
+    fn runs_on_menu(
+        &self,
+        id: NodeId,
+        current: Option<ProviderKind>,
+        difficulty: Difficulty,
+        cx: &mut Context<Self>,
+    ) -> Popover {
+        let mut menu = Popover::new().id("runs-on-menu").w(px(240.));
+        for provider in std::iter::once(None).chain(ProviderKind::ALL.map(Some)) {
+            let item = match provider {
+                None => MenuItem::new("runs-on-auto", tr("Auto", "自動")).icon(IconName::Sparkles),
+                Some(provider) => {
+                    dropdown::provider_item(("runs-on-provider", provider as usize), provider)
+                }
+            };
+            let model = provider.map(|provider| ModelChoice {
+                provider,
+                model: String::new(),
+                grade: difficulty.grade(),
+                effort: difficulty.effort(),
+            });
+            menu = menu.child(item.checked(current == provider).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.menu = None;
+                    this.edit_node(
+                        id,
+                        NodeEdit { model: Some(model.clone()), ..NodeEdit::default() },
+                        cx,
+                    );
+                },
+            )));
+            // The router's choice stands apart from the providers.
+            if provider.is_none() {
+                menu = menu.child(menu_separator(cx));
+            }
+        }
+        menu
+    }
+
     fn node_details(
         &self,
         node: &maestro_core::Node,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
@@ -420,12 +465,30 @@ impl Maestro {
             |text: &'static str| Label::new(text).size(TextSize::Small).color(TextColor::Muted);
         let group = || div().flex().flex_col().gap(theme.spacing.xs);
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
-        let runs_on = match &node.model {
-            None => 0,
-            Some(choice) => {
-                1 + ProviderKind::ALL.iter().position(|kind| *kind == choice.provider).unwrap_or(0)
-            }
-        };
+        let runs_on = node.model.as_ref().map(|choice| choice.provider);
+        let runs_on_button =
+            Button::new("runs-on", runs_on.map_or(tr("Auto", "自動"), ProviderKind::label))
+                .size(ControlSize::Small)
+                .icon(runs_on.map_or(IconName::Sparkles.into(), dropdown::provider_icon))
+                .icon_after(IconName::ChevronDown)
+                .selected(self.menu == Some(Menu::RunsOn(id)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu = if this.menu == Some(Menu::RunsOn(id)) {
+                        None
+                    } else {
+                        Some(Menu::RunsOn(id))
+                    };
+                    cx.notify();
+                }));
+        let runs_on_menu = (self.menu == Some(Menu::RunsOn(id))).then(|| {
+            div().mt(px(4.)).child(dropdown::floating(
+                "runs-on-backdrop",
+                self.runs_on_menu(id, runs_on, difficulty, cx),
+                Corner::TopLeft,
+                self.close_menu(cx),
+                window,
+            ))
+        });
         let dependencies: Vec<(NodeId, String)> = flow
             .map(|flow| {
                 flow.dependencies(id)
@@ -551,25 +614,8 @@ impl Maestro {
             .child(
                 group()
                     .child(label(tr("Runs on", "実行先")))
-                    .child(
-                        // Five names do not fit a segmented control at the inspector's width.
-                        div().flex().flex_wrap().gap(theme.spacing.xs).children(RUNS_ON.iter().enumerate().map(
-                            |(index, name)| {
-                                Button::new(("runs-on", index), if index == 0 { tr("Auto", "自動") } else { name })
-                                    .size(ControlSize::Small)
-                                    .selected(index == runs_on)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let model = (index > 0).then(|| ModelChoice {
-                                            provider: ProviderKind::ALL[index - 1],
-                                            model: String::new(),
-                                            grade: difficulty.grade(),
-                                            effort: difficulty.effort(),
-                                        });
-                                        this.edit_node(id, NodeEdit { model: Some(model), ..NodeEdit::default() }, cx);
-                                    }))
-                            },
-                        )),
-                    )
+                    .child(div().flex().child(runs_on_button))
+                    .children(runs_on_menu)
                     .child(Label::new(model_label(node)).size(TextSize::XSmall).color(TextColor::Faint)),
             )
             .child(

@@ -7,17 +7,18 @@ use atelier::agent::{
 };
 use atelier::{
     ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, CopyButton, IconName, Label,
-    ProviderLogo, SectionHeader, StepList, StepState, TextColor, TextSize, Tone,
+    Popover, ProviderLogo, SectionHeader, StepList, StepState, TextColor, TextSize, Tone,
 };
 use gpui::{
-    AnyElement, Context, ElementId, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::*, px,
+    AnyElement, Context, Corner, ElementId, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, prelude::*, px,
 };
 use maestro_client::mirror::{AgentView, Entry, ToolState};
 use maestro_core::{AgentId, NodeStatus, PermissionKind, ProviderKind, Workflow};
 use maestro_protocol::AgentStatus;
 
 use crate::app::{Maestro, Progress};
+use crate::dropdown::{self, Menu};
 use crate::graph::model_label;
 use crate::i18n::tr;
 use crate::{input, trf};
@@ -485,9 +486,29 @@ impl Maestro {
             .into_any_element()
     }
 
+    /// The providers a new commander can run on: those the project allows.
+    fn commander_menu(&self, current: ProviderKind, cx: &mut Context<Self>) -> Popover {
+        let allowed = self.allowed_providers();
+        Popover::new().id("commander-menu").w(px(220.)).children(allowed.into_iter().map(
+            |provider| {
+                dropdown::provider_item(("commander-provider", provider as usize), provider)
+                    .checked(provider == current)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.provider = provider;
+                        this.menu = None;
+                        cx.notify();
+                    }))
+            },
+        ))
+    }
+
     /// The conversation with the commander: its transcript, the plans it wrote, and the
     /// composer, in one column centred in the space it is given.
-    pub(crate) fn chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn chat(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let view = self
             .conversation
@@ -522,7 +543,7 @@ impl Maestro {
                 })
             })
             .model(provider.label())
-            .when_some(provider_logo(provider), Composer::model_logo)
+            .model_logo(dropdown::provider_icon(provider))
             .busy(busy)
             // The daemon holds a message sent mid-turn until the turn ends.
             .queue(true)
@@ -530,15 +551,25 @@ impl Maestro {
             .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
             .when(fresh, |composer| {
                 // The provider is fixed once the conversation starts.
-                // Only the providers the project allows.
                 composer.on_model(cx.listener(|this, _, _, cx| {
-                    let allowed = this.allowed_providers();
-                    let current = this.commander_provider();
-                    let index = allowed.iter().position(|kind| *kind == current).unwrap_or(0);
-                    this.provider = allowed[(index + 1) % allowed.len()];
+                    this.menu = if this.menu == Some(Menu::Commander) {
+                        None
+                    } else {
+                        Some(Menu::Commander)
+                    };
                     cx.notify();
                 }))
             });
+        // The picker opens upward from the composer's bottom row, over the transcript.
+        let menu = (fresh && self.menu == Some(Menu::Commander)).then(|| {
+            div().absolute().bottom(px(42.)).left(px(44.)).child(dropdown::floating(
+                "commander-menu-backdrop",
+                self.commander_menu(provider, cx),
+                Corner::BottomLeft,
+                self.close_menu(cx),
+                window,
+            ))
+        });
 
         div()
             .flex()
@@ -578,7 +609,14 @@ impl Maestro {
                     .px(theme.spacing.xl)
                     .pb(theme.spacing.lg)
                     .child(
-                        div().flex().flex_col().w_full().max_w(px(READING_WIDTH)).child(composer),
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(READING_WIDTH))
+                            .child(composer)
+                            .children(menu),
                     ),
             )
     }

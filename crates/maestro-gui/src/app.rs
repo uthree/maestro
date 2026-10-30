@@ -27,6 +27,7 @@ use maestro_core::{
 };
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
+use crate::dropdown::Menu;
 use crate::graph::Canvas;
 use crate::i18n::{self, Lang, tr};
 use crate::{input, link, settings, trf};
@@ -193,6 +194,8 @@ pub struct Maestro {
     pub(crate) contender: Option<AgentId>,
     /// The CLI a new commander runs on.
     pub(crate) provider: ProviderKind,
+    /// The menu that is open, if any.
+    pub(crate) menu: Option<Menu>,
     pub(crate) canvas: Canvas,
     /// Reasoning blocks and tool calls the user has opened.
     pub(crate) expanded: HashSet<SharedString>,
@@ -245,6 +248,7 @@ impl Maestro {
             node_tab: 0,
             contender: None,
             provider: ProviderKind::ClaudeCode,
+            menu: None,
             canvas: Canvas::default(),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
@@ -414,6 +418,21 @@ impl Maestro {
         match self.open_project() {
             Some(project) => project.allowed(&ProviderKind::ALL),
             None => ProviderKind::ALL.to_vec(),
+        }
+    }
+
+    /// Closes whichever menu is open, for a click outside it.
+    pub(crate) fn close_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |_, cx| {
+            this.update(cx, |this, cx| {
+                this.menu = None;
+                cx.notify();
+            })
+            .ok();
         }
     }
 
@@ -1088,14 +1107,14 @@ impl Render for Maestro {
 
         let body = match &self.connection {
             Connection::Ready(_) => {
-                let chat = (!full).then(|| self.chat(cx).into_any_element());
+                let chat = (!full).then(|| self.chat(window, cx).into_any_element());
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .when(sidebar, |row| row.child(self.sidebar(cx)))
                     .children(chat)
-                    .when(pane, |row| row.child(self.workflow_pane(pane_width, full, cx)))
+                    .when(pane, |row| row.child(self.workflow_pane(pane_width, full, window, cx)))
                     .when(resources, |row| row.child(self.project_pane(pane_width, cx)))
                     .into_any_element()
             }
