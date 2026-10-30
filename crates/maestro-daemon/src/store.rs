@@ -1,15 +1,17 @@
 //! What the daemon remembers between runs: the router's catalog and the record of outcomes.
 //!
 //! Both are JSON files in the daemon's home (`$MAESTRO_HOME`, or `~/.maestro`). `router.json`
-//! is the user's to edit: which models exist, their grades, the benchmark results they trust, and
-//! how strongly each signal counts. A missing one is written out with each provider's default
+//! is the user's to edit: which models exist, their grades, the benchmark results they trust, how
+//! strongly each signal counts, and when a node runs on several models to compare them
+//! (`comparison`: how many models, from which difficulty, and the worker limits that stand for
+//! the host's compute and each provider's usage limits). A missing one is written out with each provider's default
 //! model, so there is something to edit. `outcomes.json` is the daemon's own record.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use maestro_core::{Catalog, Outcome, Router, Weights};
+use maestro_core::{Catalog, Outcome, Router};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// The router and the record, saved to `home` when there is one.
@@ -24,7 +26,7 @@ impl Store {
     pub(crate) fn memory() -> Self {
         Self {
             home: None,
-            router: Router { catalog: Catalog::provider_defaults(), weights: Weights::default() },
+            router: Router { catalog: Catalog::provider_defaults(), ..Router::default() },
             outcomes: BTreeMap::new(),
         }
     }
@@ -50,10 +52,11 @@ impl Store {
     }
 
     /// Records how a node went, replacing what an earlier attempt at it recorded but keeping the
-    /// user's rating.
+    /// user's rating and choice.
     pub(crate) fn record(&mut self, key: String, mut outcome: Outcome) {
         if let Some(earlier) = self.outcomes.get(&key) {
             outcome.rating = outcome.rating.or(earlier.rating);
+            outcome.chosen = outcome.chosen.or(earlier.chosen);
         }
         self.outcomes.insert(key, outcome);
         self.save();
@@ -63,6 +66,15 @@ impl Store {
     pub(crate) fn rate(&mut self, key: &str, rating: u8) -> bool {
         let Some(outcome) = self.outcomes.get_mut(key) else { return false };
         outcome.rating = Some(rating);
+        self.save();
+        true
+    }
+
+    /// Records whether the user chose a contender's work over the others'. Returns whether it
+    /// has an outcome.
+    pub(crate) fn judge(&mut self, key: &str, chosen: bool) -> bool {
+        let Some(outcome) = self.outcomes.get_mut(key) else { return false };
+        outcome.chosen = Some(chosen);
         self.save();
         true
     }
@@ -109,9 +121,12 @@ mod tests {
             seconds: 30.0,
             revisions: 0,
             rating: None,
+            tags: vec!["ui".into()],
+            chosen: None,
         };
         store.record("wf1/n1".into(), outcome.clone());
         assert!(store.rate("wf1/n1", 4));
+        assert!(store.judge("wf1/n1", true));
         assert!(!store.rate("wf1/n9", 4));
         // A later attempt replaces the outcome but keeps the rating.
         store.record("wf1/n1".into(), Outcome { revisions: 1, ..outcome });
@@ -119,6 +134,7 @@ mod tests {
         let reopened = Store::open(home.path()).unwrap();
         let outcomes = reopened.outcomes();
         assert_eq!((outcomes[0].revisions, outcomes[0].rating), (1, Some(4)));
+        assert_eq!((outcomes[0].chosen, &outcomes[0].tags[..]), (Some(true), &["ui".into()][..]));
         assert_eq!(reopened.router.catalog.models.len(), 4);
     }
 }

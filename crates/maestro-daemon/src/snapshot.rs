@@ -40,7 +40,20 @@ impl Snapshot {
                 .map(|node| node.id)
                 .collect();
             for node in busy {
-                flow.set_status(node, NodeStatus::Failed).ok();
+                // A compared node keeps the work its contenders finished, for the user to pick.
+                let contenders: Vec<_> = flow
+                    .node(node)
+                    .filter(|node| node.agent.is_none())
+                    .map(|node| node.contenders.iter().map(|c| (c.agent, c.status)).collect())
+                    .unwrap_or_default();
+                if contenders.is_empty() {
+                    flow.set_status(node, NodeStatus::Failed).ok();
+                }
+                for (agent, status) in contenders {
+                    if matches!(status, NodeStatus::Running | NodeStatus::AwaitingUser) {
+                        flow.set_contender_status(node, agent, NodeStatus::Failed).ok();
+                    }
+                }
             }
         }
         for agent in &mut self.agents {
@@ -69,6 +82,7 @@ mod tests {
             instructions: String::new(),
             model: None,
             difficulty: None,
+            tags: Vec::new(),
             origin: NodeOrigin::User,
         };
         let (running, done) = (flow.add_node(draft("a")), flow.add_node(draft("b")));

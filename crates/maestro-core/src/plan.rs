@@ -24,15 +24,15 @@ pub const COMMANDER_INSTRUCTIONS: &str = r#"You are Maestro's commander. You tal
 
 Workers carry out the plan. Each node of a plan goes to one worker, which runs in its own git worktree with the work of the nodes it depends on already merged in. Workers see only their node's instructions, so make each one complete on its own: what to change, where, and how to know it is done. Prefer a few substantial nodes to many tiny ones, and make nodes independent where you can so they run in parallel.
 
-Rate each node's difficulty, which decides the model and effort it gets: "trivial" (mechanical), "easy" (small and well specified), "moderate" (ordinary feature or bug work), "hard" (design, many files, subtle behaviour) or "expert" (open-ended design, an unexplained bug).
+Rate each node's difficulty, which decides the model and effort it gets: "trivial" (mechanical), "easy" (small and well specified), "moderate" (ordinary feature or bug work), "hard" (design, many files, subtle behaviour) or "expert" (open-ended design, an unexplained bug). Tag each node with one to three short lowercase words for the kind of work, such as "ui", "api", "tests", "docs" or "refactor"; Maestro learns which models do well at which kind. Reuse the same words for the same kind of work.
 
 Discuss the plan with the user first. Once they agree, include it in your reply exactly once, as a fenced block:
 
 ```maestro-plan
 {"title": "Short name of the whole job",
  "nodes": [
-   {"key": "api", "title": "Add the endpoint", "instructions": "...", "difficulty": "moderate", "depends_on": []},
-   {"key": "ui", "title": "Show it in the UI", "instructions": "...", "difficulty": "easy", "depends_on": ["api"]}
+   {"key": "api", "title": "Add the endpoint", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": []},
+   {"key": "ui", "title": "Show it in the UI", "instructions": "...", "difficulty": "easy", "tags": ["ui"], "depends_on": ["api"]}
  ]}
 ```
 
@@ -61,6 +61,9 @@ pub struct PlanNode {
     pub instructions: String,
     /// How hard it is.
     pub difficulty: Option<Difficulty>,
+    /// The kind of work it is.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Keys of the steps that must succeed first.
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -121,6 +124,7 @@ impl Plan {
                 instructions: node.instructions.clone(),
                 model: None,
                 difficulty: node.difficulty,
+                tags: node.tags.clone(),
                 origin: NodeOrigin::Commander,
             };
             if ids.insert(node.key.clone(), workflow.add_node(draft)).is_some() {
@@ -152,6 +156,7 @@ mod tests {
         let workflow = plan.clone().into_workflow(WorkflowId(1), None).unwrap();
         assert_eq!(workflow.topological_order(), [NodeId(1), NodeId(2)]);
         assert_eq!(workflow.node(NodeId(2)).unwrap().difficulty, Some(Difficulty::Easy));
+        assert_eq!(workflow.node(NodeId(2)).unwrap().tags, ["ui"]);
         assert!(workflow.nodes().all(|node| node.origin == NodeOrigin::Commander));
     }
 
@@ -172,6 +177,7 @@ mod tests {
             title: key.into(),
             instructions: String::new(),
             difficulty: None,
+            tags: Vec::new(),
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
         };
         let plan = |nodes| Plan { title: "t".into(), nodes };

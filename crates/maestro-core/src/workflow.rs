@@ -37,6 +37,8 @@ pub enum NodeStatus {
     Running,
     /// The worker is waiting for the user to answer.
     AwaitingUser,
+    /// It ran on several models, and the user has yet to pick whose work to keep.
+    AwaitingChoice,
     /// Finished and accepted.
     Succeeded,
     /// Finished without success; its dependents do not start.
@@ -55,6 +57,10 @@ pub struct NodeDraft {
     /// How hard it is; decides the model's grade and effort when the router chooses.
     #[serde(default)]
     pub difficulty: Option<Difficulty>,
+    /// The kind of work it is, in a few short words (`"ui"`, `"tests"`); the router learns which
+    /// models do well at each.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Who wrote it.
     pub origin: NodeOrigin,
 }
@@ -71,6 +77,9 @@ pub struct NodeEdit {
     pub model: Option<Option<ModelChoice>>,
     /// A new difficulty.
     pub difficulty: Option<Difficulty>,
+    /// New tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 /// One piece of work for one worker.
@@ -87,16 +96,37 @@ pub struct Node {
     /// How hard it is.
     #[serde(default)]
     pub difficulty: Option<Difficulty>,
+    /// The kind of work it is.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Who wrote it.
     pub origin: NodeOrigin,
     /// Where it is in its life.
     pub status: NodeStatus,
     /// The worker on it, once one has started. A user's message to the node goes to this agent.
+    /// While the node is being compared there is none yet: it is the contender the user picks.
     #[serde(default)]
     pub agent: Option<AgentId>,
     /// The branch its work is committed on, once it has a worktree.
     #[serde(default)]
     pub branch: Option<String>,
+    /// The workers given this node at once to compare their work, when it ran on several models.
+    #[serde(default)]
+    pub contenders: Vec<Contender>,
+}
+
+/// One of the workers a node ran on at once. Each works in its own worktree on its own branch;
+/// the one the user picks becomes the node's worker, and its branch the node's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contender {
+    /// The worker.
+    pub agent: AgentId,
+    /// The model it runs on.
+    pub model: ModelChoice,
+    /// The branch its work is committed on.
+    pub branch: String,
+    /// Where it is: running, waiting for the user, succeeded or failed.
+    pub status: NodeStatus,
 }
 
 /// The repository a workflow's workers check out, and what happens to their work.
@@ -132,6 +162,17 @@ pub enum WorkflowError {
     /// A node cannot depend on itself.
     #[error("node {0} cannot depend on itself")]
     SelfDependency(NodeId),
+    /// The node is not waiting for the user to pick a contender.
+    #[error("node {0} is not waiting for a choice")]
+    NotChoosing(NodeId),
+    /// The agent is not one of the node's contenders, or its work did not succeed.
+    #[error("{agent} has no finished work on node {node} to choose")]
+    NoSuchContender {
+        /// The node.
+        node: NodeId,
+        /// The agent named.
+        agent: AgentId,
+    },
     /// The edge would close a loop, so no order of work would exist.
     #[error("{from} → {to} would make a cycle")]
     Cycle {
@@ -229,7 +270,7 @@ impl Workflow {
     pub fn add_node(&mut self, draft: NodeDraft) -> NodeId {
         let id = NodeId(self.next_node);
         self.next_node += 1;
-        let NodeDraft { title, instructions, model, difficulty, origin } = draft;
+        let NodeDraft { title, instructions, model, difficulty, tags, origin } = draft;
         let status = NodeStatus::Pending;
         let node = Node {
             id,
@@ -237,10 +278,12 @@ impl Workflow {
             instructions,
             model,
             difficulty,
+            tags,
             origin,
             status,
             agent: None,
             branch: None,
+            contenders: Vec::new(),
         };
         self.nodes.insert(id, node);
         id
@@ -287,7 +330,7 @@ impl Workflow {
         by: NodeOrigin,
     ) -> Result<(), WorkflowError> {
         let node = self.node_mut(id)?;
-        let NodeEdit { title, instructions, model, difficulty } = edit;
+        let NodeEdit { title, instructions, model, difficulty, tags } = edit;
         if let Some(title) = title {
             node.title = title;
         }
@@ -299,6 +342,9 @@ impl Workflow {
         }
         if let Some(difficulty) = difficulty {
             node.difficulty = Some(difficulty);
+        }
+        if let Some(tags) = tags {
+            node.tags = tags;
         }
         if by == NodeOrigin::User {
             node.origin = NodeOrigin::User;
@@ -319,6 +365,88 @@ impl Workflow {
         node.model = Some(model);
         node.branch = Some(branch);
         node.status = NodeStatus::Running;
+        Ok(())
+    }
+
+    /// Records the workers a node runs on at once, to compare their work. The node has no worker
+    /// of its own until the user picks one with [`Workflow::choose_contender`].
+    pub fn assign_contenders(
+        &mut self,
+        id: NodeId,
+        contenders: Vec<Contender>,
+    ) -> Result<(), WorkflowError> {
+        let node = self.node_mut(id)?;
+        node.agent = None;
+        node.model = None;
+        node.branch = None;
+        node.contenders = contenders;
+        node.status = NodeStatus::Running;
+        Ok(())
+    }
+
+    /// Sets one contender's status, and from all of them the node's: running while any runs,
+    /// waiting for the user's choice once two or more succeeded, and failed if none did. When
+    /// exactly one succeeded there is nothing to choose, so its work becomes the node's.
+    ///
+    /// Returns the node's new status.
+    pub fn set_contender_status(
+        &mut self,
+        id: NodeId,
+        agent: AgentId,
+        status: NodeStatus,
+    ) -> Result<NodeStatus, WorkflowError> {
+        let node = self.node_mut(id)?;
+        let contender = node
+            .contenders
+            .iter_mut()
+            .find(|contender| contender.agent == agent)
+            .ok_or(WorkflowError::NoSuchContender { node: id, agent })?;
+        contender.status = status;
+        if node.agent.is_some() {
+            // Already chosen: the node's status is its worker's now.
+            return Ok(node.status);
+        }
+        let any = |status: NodeStatus| node.contenders.iter().any(|c| c.status == status);
+        let succeeded: Vec<AgentId> = node
+            .contenders
+            .iter()
+            .filter(|contender| contender.status == NodeStatus::Succeeded)
+            .map(|contender| contender.agent)
+            .collect();
+        node.status = if any(NodeStatus::AwaitingUser) {
+            NodeStatus::AwaitingUser
+        } else if any(NodeStatus::Running) || any(NodeStatus::Pending) {
+            NodeStatus::Running
+        } else if succeeded.is_empty() {
+            NodeStatus::Failed
+        } else {
+            NodeStatus::AwaitingChoice
+        };
+        if let [only] = succeeded[..]
+            && node.status == NodeStatus::AwaitingChoice
+        {
+            self.choose_contender(id, only)?;
+        }
+        Ok(self.nodes[&id].status)
+    }
+
+    /// Keeps one contender's work: it becomes the node's worker, model and branch, and the
+    /// node succeeds.
+    pub fn choose_contender(&mut self, id: NodeId, agent: AgentId) -> Result<(), WorkflowError> {
+        let node = self.node_mut(id)?;
+        if node.status != NodeStatus::AwaitingChoice {
+            return Err(WorkflowError::NotChoosing(id));
+        }
+        let chosen = node
+            .contenders
+            .iter()
+            .find(|c| c.agent == agent && c.status == NodeStatus::Succeeded)
+            .ok_or(WorkflowError::NoSuchContender { node: id, agent })?
+            .clone();
+        node.agent = Some(chosen.agent);
+        node.model = Some(chosen.model);
+        node.branch = Some(chosen.branch);
+        node.status = NodeStatus::Succeeded;
         Ok(())
     }
 
@@ -413,6 +541,7 @@ mod tests {
             instructions: String::new(),
             model: None,
             difficulty: None,
+            tags: Vec::new(),
             origin: NodeOrigin::Commander,
         }
     }
@@ -482,5 +611,49 @@ mod tests {
         let (flow, _) = diamond();
         let text = serde_json::to_string(&flow).unwrap();
         assert_eq!(serde_json::from_str::<Workflow>(&text).unwrap(), flow);
+    }
+
+    #[test]
+    fn a_compared_node_waits_for_the_users_choice() {
+        let (mut flow, [a, b, ..]) = diamond();
+        let model = ModelChoice {
+            provider: crate::ProviderKind::ClaudeCode,
+            model: String::new(),
+            grade: crate::ModelGrade::Standard,
+            effort: crate::Effort::Medium,
+        };
+        let contender = |agent: u64| Contender {
+            agent: AgentId(agent),
+            model: model.clone(),
+            branch: format!("maestro/wf1-n1-c{agent}"),
+            status: NodeStatus::Running,
+        };
+        flow.assign_contenders(a, vec![contender(1), contender(2)]).unwrap();
+        assert_eq!(flow.choose_contender(a, AgentId(1)), Err(WorkflowError::NotChoosing(a)));
+        let set = |flow: &mut Workflow, agent, status| {
+            flow.set_contender_status(a, AgentId(agent), status).unwrap()
+        };
+        assert_eq!(set(&mut flow, 1, NodeStatus::Succeeded), NodeStatus::Running);
+        assert_eq!(set(&mut flow, 2, NodeStatus::AwaitingUser), NodeStatus::AwaitingUser);
+        assert_eq!(set(&mut flow, 2, NodeStatus::Succeeded), NodeStatus::AwaitingChoice);
+        assert!(flow.ready().is_empty(), "its dependents wait for the choice");
+        assert!(flow.choose_contender(a, AgentId(9)).is_err());
+
+        flow.choose_contender(a, AgentId(2)).unwrap();
+        let node = flow.node(a).unwrap();
+        assert_eq!(node.agent, Some(AgentId(2)));
+        assert_eq!(node.branch.as_deref(), Some("maestro/wf1-n1-c2"));
+        assert_eq!(flow.ready(), vec![b, NodeId(3)]);
+
+        // With one success there is nothing to choose; with none the node fails.
+        let (mut flow, [a, ..]) = diamond();
+        flow.assign_contenders(a, vec![contender(1), contender(2)]).unwrap();
+        set(&mut flow, 1, NodeStatus::Failed);
+        assert_eq!(set(&mut flow, 2, NodeStatus::Succeeded), NodeStatus::Succeeded);
+        assert_eq!(flow.node(a).unwrap().agent, Some(AgentId(2)));
+        let (mut flow, [a, ..]) = diamond();
+        flow.assign_contenders(a, vec![contender(1), contender(2)]).unwrap();
+        set(&mut flow, 1, NodeStatus::Failed);
+        assert_eq!(set(&mut flow, 2, NodeStatus::Failed), NodeStatus::Failed);
     }
 }

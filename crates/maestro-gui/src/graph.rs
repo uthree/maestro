@@ -17,7 +17,9 @@ use gpui::{
     ParentElement, PathBuilder, Pixels, Point, ScrollWheelEvent, Styled, canvas, div, fill, point,
     prelude::*, px, size,
 };
-use maestro_core::{Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId};
+use maestro_core::{
+    ModelChoice, Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId,
+};
 
 use crate::app::Maestro;
 
@@ -127,6 +129,7 @@ pub fn status_label(status: NodeStatus) -> &'static str {
         NodeStatus::Pending => "Waiting",
         NodeStatus::Running => "Working",
         NodeStatus::AwaitingUser => "Needs you",
+        NodeStatus::AwaitingChoice => "Pick one",
         NodeStatus::Succeeded => "Done",
         NodeStatus::Failed => "Failed",
     }
@@ -137,7 +140,7 @@ pub fn status_tone(status: NodeStatus) -> Tone {
     match status {
         NodeStatus::Pending => Tone::Neutral,
         NodeStatus::Running => Tone::Accent,
-        NodeStatus::AwaitingUser => Tone::Warning,
+        NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => Tone::Warning,
         NodeStatus::Succeeded => Tone::Success,
         NodeStatus::Failed => Tone::Danger,
     }
@@ -145,6 +148,11 @@ pub fn status_tone(status: NodeStatus) -> Tone {
 
 /// The model a node runs on, or will.
 pub fn model_label(node: &Node) -> String {
+    if node.model.is_none() && !node.contenders.is_empty() {
+        let names: Vec<String> =
+            node.contenders.iter().map(|contender| choice_label(&contender.model)).collect();
+        return format!("Compared: {}", names.join(" vs "));
+    }
     match &node.model {
         Some(choice) if choice.model.is_empty() => {
             format!("{} · {}", choice.provider.label(), choice.effort.label())
@@ -152,6 +160,11 @@ pub fn model_label(node: &Node) -> String {
         Some(choice) => format!("{} · {}", choice.model, choice.effort.label()),
         None => "Chosen when it runs".into(),
     }
+}
+
+/// A model in a few words: its name, or its provider's when it is the CLI's default.
+pub fn choice_label(choice: &ModelChoice) -> String {
+    if choice.model.is_empty() { choice.provider.label().into() } else { choice.model.clone() }
 }
 
 impl Maestro {
@@ -298,6 +311,9 @@ impl Maestro {
             NodeStatus::AwaitingUser => mark
                 .child(word("Needs you", TextColor::Warning))
                 .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.warning)),
+            NodeStatus::AwaitingChoice => mark
+                .child(word("Pick one", TextColor::Warning))
+                .child(Icon::new(IconName::Eye).size(px(12.)).color(theme.colors.warning)),
             NodeStatus::Succeeded => mark
                 .child(word("Done", TextColor::Faint))
                 .child(Icon::new(IconName::Check).size(px(12.)).color(theme.colors.success)),
@@ -322,7 +338,7 @@ impl Maestro {
         let draft = node.origin == NodeOrigin::Commander && node.status == NodeStatus::Pending;
         let border = match node.status {
             _ if draft => theme.colors.agent,
-            NodeStatus::AwaitingUser => theme.colors.warning,
+            NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => theme.colors.warning,
             NodeStatus::Failed => theme.colors.danger,
             NodeStatus::Running => theme.colors.accent,
             _ if selected => theme.colors.accent,

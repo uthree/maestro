@@ -21,9 +21,11 @@ pub use event::{AgentEvent, PermissionKind, PermissionRequest, ToolCall};
 pub use id::{AgentId, NodeId, WorkflowId};
 pub use plan::{COMMANDER_INSTRUCTIONS, Plan, PlanError, PlanNode, WORKER_INSTRUCTIONS};
 pub use provider::{Effort, ModelChoice, ModelGrade, ProviderKind};
-pub use routing::{Catalog, Choice, Difficulty, ModelKey, ModelProfile, Outcome, Router, Weights};
+pub use routing::{
+    Catalog, Choice, Comparison, Difficulty, ModelKey, ModelProfile, Outcome, Router, Weights,
+};
 pub use target::{Host, Workspace, Worktree};
 pub use workflow::{
-    Edge, Node, NodeDraft, NodeEdit, NodeOrigin, NodeStatus, Workflow, WorkflowError,
+    Contender, Edge, Node, NodeDraft, NodeEdit, NodeOrigin, NodeStatus, Workflow, WorkflowError,
     WorkflowTarget,
 };

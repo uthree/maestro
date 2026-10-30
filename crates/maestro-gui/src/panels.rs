@@ -548,14 +548,22 @@ impl Maestro {
     pub(crate) fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let node = self.selected.and_then(|id| self.current()?.node(id)).cloned();
+        // A contender the user asked to see, else the node's own worker.
         let worker = node
             .as_ref()
-            .and_then(|node| node.agent)
+            .and_then(|node| {
+                let contender = self.contender.filter(|agent| {
+                    node.contenders.iter().any(|contender| contender.agent == *agent)
+                });
+                contender.or(node.agent)
+            })
             .and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?.clone())));
         let content = match &node {
             Some(node) if self.node_tab == 1 && worker.is_some() => {
                 let (agent, view) = worker.clone().expect("checked above");
-                self.worker(node.id, agent, &view, cx).into_any_element()
+                // Only the node's own worker takes revision requests.
+                let reply = node.agent == Some(agent);
+                self.worker(node.id, agent, &view, reply, cx).into_any_element()
             }
             Some(node) => self.node_details(node, cx).into_any_element(),
             None => self.overview(cx).into_any_element(),
@@ -693,8 +701,16 @@ impl Maestro {
                         Label::new("Decides the model's grade and effort when the router picks it")
                             .size(TextSize::XSmall)
                             .color(TextColor::Faint),
-                    ),
+                    )
+                    .when(!node.tags.is_empty(), |group| {
+                        group.child(
+                            Label::new(format!("Kind of work: {}", node.tags.join(", ")))
+                                .size(TextSize::XSmall)
+                                .color(TextColor::Muted),
+                        )
+                    }),
             )
+            .when(!node.contenders.is_empty(), |details| details.child(self.contenders(node, cx)))
             .child(
                 group()
                     .child(label("Runs on"))
@@ -774,6 +790,7 @@ impl Maestro {
         node: NodeId,
         agent: AgentId,
         view: &AgentView,
+        reply: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
@@ -797,22 +814,126 @@ impl Maestro {
                     .p(theme.spacing.lg)
                     .children(rows),
             )
-            .child(
-                div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(input::stretch(
-                    px(INSPECTOR_WIDTH) - theme.spacing.sm * 2.,
-                    Composer::new("worker-composer")
-                        .input({
-                            let this = cx.entity().downgrade();
-                            input::message(&self.fields.node_message, move |window, cx| {
-                                this.update(cx, |this, cx| this.send_to_node(window, cx)).ok();
-                            })
-                        })
-                        .model(format!("{} · worker", view.spec.model.provider.label()))
-                        .busy(busy)
-                        .on_send(cx.listener(|this, _, window, cx| this.send_to_node(window, cx)))
-                        .on_stop(cx.listener(move |this, _, _, cx| this.interrupt(agent, cx))),
-                )),
-            )
+            .when(reply, |worker| {
+                worker.child(
+                    div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(
+                        input::stretch(
+                            px(INSPECTOR_WIDTH) - theme.spacing.sm * 2.,
+                            Composer::new("worker-composer")
+                                .input({
+                                    let this = cx.entity().downgrade();
+                                    input::message(&self.fields.node_message, move |window, cx| {
+                                        this.update(cx, |this, cx| this.send_to_node(window, cx))
+                                            .ok();
+                                    })
+                                })
+                                .model(format!("{} · worker", view.spec.model.provider.label()))
+                                .busy(busy)
+                                .on_send(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.send_to_node(window, cx)
+                                    }),
+                                )
+                                .on_stop(
+                                    cx.listener(move |this, _, _, cx| this.interrupt(agent, cx)),
+                                ),
+                        ),
+                    ),
+                )
+            })
+    }
+
+    /// The models a node ran on at once, each with the end of its answer, to pick the better
+    /// work.
+    fn contenders(
+        &self,
+        node: &maestro_core::Node,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let id = node.id;
+        let choosing = node.status == NodeStatus::AwaitingChoice;
+        let hint = if choosing {
+            "Pick the better work. Maestro learns which model does well at this kind of work"
+        } else if node.agent.is_some() {
+            "The kept work is the one its dependents build on"
+        } else {
+            "Each model works in its own worktree; pick one when they finish"
+        };
+        let cards = node.contenders.iter().enumerate().map(|(index, contender)| {
+            let agent = contender.agent;
+            let kept = node.agent == Some(agent);
+            let (badge, tone) = if kept {
+                ("Kept", atelier::Tone::Success)
+            } else {
+                (status_label(contender.status), status_tone(contender.status))
+            };
+            let answer =
+                self.mirror.agents.get(&agent).and_then(|view| view.transcript.last_answer()).map(
+                    |answer| match answer.char_indices().nth(280) {
+                        Some((end, _)) => format!("{}…", &answer[..end]),
+                        None => answer.to_owned(),
+                    },
+                );
+            Card::new()
+                .p(theme.spacing.md)
+                .gap(theme.spacing.sm)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(theme.spacing.sm)
+                        .child(
+                            Label::new(format!(
+                                "{} · {}",
+                                contender.model.provider.label(),
+                                crate::graph::choice_label(&contender.model)
+                            ))
+                            .size(TextSize::Small),
+                        )
+                        .child(Badge::new(badge).tone(tone).dot()),
+                )
+                .children(answer.map(|answer| {
+                    Label::new(answer).size(TextSize::XSmall).color(TextColor::Muted)
+                }))
+                .child(
+                    Label::new(contender.branch.clone())
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Faint),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(theme.spacing.xs)
+                        .child(
+                            Button::new(("view-contender", index), "View work")
+                                .icon(IconName::Eye)
+                                .size(ControlSize::Small)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.view_contender(agent, cx)
+                                })),
+                        )
+                        .when(choosing && contender.status == NodeStatus::Succeeded, |row| {
+                            row.child(
+                                Button::new(("keep-contender", index), "Keep this")
+                                    .primary()
+                                    .icon(IconName::Check)
+                                    .size(ControlSize::Small)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.choose_contender(id, agent, cx)
+                                    })),
+                            )
+                        }),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.xs)
+            .child(Label::new("Compared").size(TextSize::Small).color(TextColor::Muted))
+            .children(cards)
+            .child(Label::new(hint).size(TextSize::XSmall).color(TextColor::Faint))
     }
 
     /// The inspector with no node selected: the workflow as a whole.

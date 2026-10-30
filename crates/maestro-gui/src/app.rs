@@ -106,6 +106,8 @@ pub struct Maestro {
     pub(crate) sidebar_open: bool,
     /// The inspector's tab: the node's details or its worker.
     pub(crate) node_tab: usize,
+    /// The contender the worker tab shows, when the node ran on several models.
+    pub(crate) contender: Option<AgentId>,
     /// The CLI a new commander runs on.
     pub(crate) provider: ProviderKind,
     pub(crate) canvas: Canvas,
@@ -154,6 +156,7 @@ impl Maestro {
             panel_open: true,
             sidebar_open: true,
             node_tab: 0,
+            contender: None,
             provider: ProviderKind::ClaudeCode,
             canvas: Canvas::default(),
             expanded: HashSet::new(),
@@ -273,6 +276,9 @@ impl Maestro {
 
     /// Selects a node; the edit fields are filled from it at the next frame.
     pub(crate) fn select(&mut self, node: Option<NodeId>) {
+        if self.selected != node {
+            self.contender = None;
+        }
         self.selected = node;
     }
 
@@ -449,6 +455,7 @@ impl Maestro {
             instructions: String::new(),
             model: None,
             difficulty: Some(Difficulty::Moderate),
+            tags: Vec::new(),
             origin: NodeOrigin::User,
         };
         self.request(Command::AddNode { workflow, node }, cx, move |this, reply, _| {
@@ -515,6 +522,25 @@ impl Maestro {
         });
     }
 
+    /// Shows a contender's work in the worker tab.
+    pub(crate) fn view_contender(&mut self, agent: AgentId, cx: &mut Context<Self>) {
+        self.contender = Some(agent);
+        self.node_tab = 1;
+        cx.notify();
+    }
+
+    /// Keeps a contender's work on the selected node.
+    pub(crate) fn choose_contender(
+        &mut self,
+        node: NodeId,
+        agent: AgentId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workflow) = self.workflow else { return };
+        self.contender = None;
+        self.command(Command::ChooseContender { workflow, node, agent }, cx);
+    }
+
     pub(crate) fn interrupt(&mut self, agent: AgentId, cx: &mut Context<Self>) {
         self.command(Command::InterruptAgent { agent }, cx);
     }
@@ -538,7 +564,11 @@ impl Maestro {
                 && flow.nodes().all(|node| node.status == NodeStatus::Succeeded)
         });
         let waiting = flow.map_or(0, |flow| {
-            flow.nodes().filter(|node| node.status == NodeStatus::AwaitingUser).count()
+            flow.nodes()
+                .filter(|node| {
+                    matches!(node.status, NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice)
+                })
+                .count()
         });
         let failed = flow.map_or(0, |flow| {
             flow.nodes().filter(|node| node.status == NodeStatus::Failed).count()

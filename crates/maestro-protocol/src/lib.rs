@@ -22,7 +22,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -120,6 +120,17 @@ pub enum Command {
         /// The rating.
         rating: u8,
     },
+    /// Keeps one contender's work on a node that ran on several models at once, and records
+    /// the choice so the router learns which model the user prefers for this kind of work. The
+    /// other contenders stop; their branches stay.
+    ChooseContender {
+        /// Which workflow.
+        workflow: WorkflowId,
+        /// Which node; it must be waiting for a choice.
+        node: NodeId,
+        /// The contender whose work to keep.
+        agent: AgentId,
+    },
     /// Starts a commander: an agent that converses with the user and writes plans, which become
     /// new workflows. The user talks to it with [`Command::SendToAgent`].
     StartCommander {
@@ -136,6 +147,9 @@ pub enum Command {
     ChooseModel {
         /// How hard the node is.
         difficulty: Difficulty,
+        /// The kind of work it is.
+        #[serde(default)]
+        tags: Vec<String>,
         /// The host the worker would run on; only providers installed there count.
         host: Host,
     },
@@ -514,6 +528,7 @@ mod tests {
             instructions: String::new(),
             model: None,
             difficulty: None,
+            tags: Vec::new(),
             origin: maestro_core::NodeOrigin::User,
         });
         let b = workflow.add_node(NodeDraft {
@@ -521,6 +536,7 @@ mod tests {
             instructions: String::new(),
             model: None,
             difficulty: None,
+            tags: Vec::new(),
             origin: maestro_core::NodeOrigin::User,
         });
         workflow.add_edge(a, b).unwrap();

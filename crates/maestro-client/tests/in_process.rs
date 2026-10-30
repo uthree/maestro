@@ -13,6 +13,7 @@ fn draft(title: &str) -> NodeDraft {
         instructions: String::new(),
         model: None,
         difficulty: None,
+        tags: Vec::new(),
         origin: NodeOrigin::User,
     }
 }
