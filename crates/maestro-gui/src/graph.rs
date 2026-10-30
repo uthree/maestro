@@ -20,6 +20,7 @@ use gpui::{
 use maestro_core::{Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId};
 
 use crate::app::Maestro;
+use crate::i18n::{self, tr};
 
 /// A node's width on the canvas.
 const NODE_WIDTH: f32 = 248.;
@@ -124,11 +125,11 @@ impl Geometry {
 /// A status in words and a mark, never colour alone.
 pub fn status_label(status: NodeStatus) -> &'static str {
     match status {
-        NodeStatus::Pending => "Waiting",
-        NodeStatus::Running => "Working",
-        NodeStatus::AwaitingUser => "Needs you",
-        NodeStatus::Succeeded => "Done",
-        NodeStatus::Failed => "Failed",
+        NodeStatus::Pending => tr("Waiting", "待機中"),
+        NodeStatus::Running => tr("Working", "作業中"),
+        NodeStatus::AwaitingUser => tr("Needs you", "要対応"),
+        NodeStatus::Succeeded => tr("Done", "完了"),
+        NodeStatus::Failed => tr("Failed", "失敗"),
     }
 }
 
@@ -147,10 +148,10 @@ pub fn status_tone(status: NodeStatus) -> Tone {
 pub fn model_label(node: &Node) -> String {
     match &node.model {
         Some(choice) if choice.model.is_empty() => {
-            format!("{} · {}", choice.provider.label(), choice.effort.label())
+            format!("{} · {}", choice.provider.label(), i18n::effort(choice.effort))
         }
-        Some(choice) => format!("{} · {}", choice.model, choice.effort.label()),
-        None => "Chosen when it runs".into(),
+        Some(choice) => format!("{} · {}", choice.model, i18n::effort(choice.effort)),
+        None => tr("Chosen when it runs", "実行時に選択").into(),
     }
 }
 
@@ -229,7 +230,11 @@ impl Maestro {
         };
         let offset = -(px(1.) + px(HIT / 2.));
         let header = Geometry::new(theme).header;
-        let tooltip = if output { "Steps that wait for this one" } else { "Waits for" };
+        let tooltip = if output {
+            tr("Steps that wait for this one", "このステップを待つステップ")
+        } else {
+            tr("Waits for", "待機先")
+        };
         div()
             .id((if output { "out" } else { "in" }, id.0 as usize))
             .absolute()
@@ -290,19 +295,21 @@ impl Maestro {
                 mark.child(Icon::new(IconName::Sparkles).size(px(12.)).color(theme.colors.agent))
             }
             NodeStatus::Pending => mark,
-            NodeStatus::Running => mark.child(word("Working", TextColor::Muted)).child(
-                Spinner::new(("node-spinner", node.id.0 as usize))
-                    .size(px(12.))
-                    .color(theme.colors.accent),
-            ),
+            NodeStatus::Running => {
+                mark.child(word(status_label(node.status), TextColor::Muted)).child(
+                    Spinner::new(("node-spinner", node.id.0 as usize))
+                        .size(px(12.))
+                        .color(theme.colors.accent),
+                )
+            }
             NodeStatus::AwaitingUser => mark
-                .child(word("Needs you", TextColor::Warning))
+                .child(word(status_label(node.status), TextColor::Warning))
                 .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.warning)),
             NodeStatus::Succeeded => mark
-                .child(word("Done", TextColor::Faint))
+                .child(word(status_label(node.status), TextColor::Faint))
                 .child(Icon::new(IconName::Check).size(px(12.)).color(theme.colors.success)),
             NodeStatus::Failed => mark
-                .child(word("Failed", TextColor::Danger))
+                .child(word(status_label(node.status), TextColor::Danger))
                 .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.danger)),
         }
     }
@@ -364,7 +371,9 @@ impl Maestro {
                     .flex()
                     .items_center()
                     .gap(theme.spacing.sm)
-                    .children(node.difficulty.map(|difficulty| Badge::new(difficulty.label())))
+                    .children(
+                        node.difficulty.map(|difficulty| Badge::new(i18n::difficulty(difficulty))),
+                    )
                     .child(
                         div().flex_1().min_w_0().child(
                             Label::new(model_label(node))
@@ -376,7 +385,7 @@ impl Maestro {
             )
             .child(
                 Label::new(if node.instructions.is_empty() {
-                    "No instructions yet".to_string()
+                    tr("No instructions yet", "指示はまだありません").to_string()
                 } else {
                     node.instructions.lines().next().unwrap_or_default().to_string()
                 })
@@ -437,14 +446,14 @@ impl Maestro {
                         .bg(theme.colors.agent_wash)
                         .child(
                             div().flex_1().min_w_0().child(
-                                Label::new("Draft")
+                                Label::new(tr("Draft", "下書き"))
                                     .size(TextSize::XSmall)
                                     .color(TextColor::Agent)
                                     .truncate(),
                             ),
                         )
                         .child(
-                            Button::new(("undo-node", id.0 as usize), "Remove")
+                            Button::new(("undo-node", id.0 as usize), tr("Remove", "削除"))
                                 .ghost()
                                 .size(ControlSize::Small)
                                 .on_click(
@@ -452,7 +461,7 @@ impl Maestro {
                                 ),
                         )
                         .child(
-                            Button::new(("keep-node", id.0 as usize), "Keep")
+                            Button::new(("keep-node", id.0 as usize), tr("Keep", "採用"))
                                 .size(ControlSize::Small)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.edit_node(id, NodeEdit::default(), cx);
@@ -541,19 +550,20 @@ impl Maestro {
             .border_color(theme.colors.border)
             .shadow(theme.elevation.medium.clone())
             .child(
-                Button::new("add-node", "Add step")
+                Button::new("add-node", tr("Add step", "ステップを追加"))
                     .ghost()
                     .icon(IconName::Plus)
                     .size(ControlSize::Small)
                     .on_click(cx.listener(|this, _, _, cx| this.add_node(cx))),
             )
             .child(
-                Button::new("reset-view", "Reset view").ghost().size(ControlSize::Small).on_click(
-                    cx.listener(|this, _, _, cx| {
+                Button::new("reset-view", tr("Reset view", "表示をリセット"))
+                    .ghost()
+                    .size(ControlSize::Small)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.canvas.reset();
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
             .child(Divider::vertical())
             .child(
@@ -563,9 +573,12 @@ impl Maestro {
                     .gap(theme.spacing.xs)
                     .child(StatusDot::new(theme.colors.ports[0]))
                     .child(
-                        Label::new("Waits for · drag from a step's right edge to another step")
-                            .size(TextSize::XSmall)
-                            .color(TextColor::Muted),
+                        Label::new(tr(
+                            "Waits for · drag from a step's right edge to another step",
+                            "待機関係 · ステップの右端から別のステップへドラッグ",
+                        ))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Muted),
                     ),
             )
     }
@@ -606,38 +619,48 @@ impl Maestro {
             )
             .on_mouse_move(cx.listener(|this, event, _, cx| this.canvas_mouse_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.canvas_mouse_up(cx)))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, cx| this.canvas_mouse_up(cx)))
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _, _, cx| this.canvas_mouse_up(cx)),
+            )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.canvas_scroll(event, cx)))
             .child(div().absolute().inset_0().child(self.wires(&flow, &layout, cx)))
             .children(nodes)
             .when(empty, |graph| {
                 graph.child(
                     div().absolute().inset_0().flex().items_center().justify_center().child(
-                        EmptyState::new(IconName::Sparkles, "No steps yet")
-                            .description(
-                                "Ask the commander for a plan, or add a step and write it yourself.",
-                            )
-                            .action(
-                                div()
-                                    .flex()
-                                    .gap(theme.spacing.sm)
-                                    .child(
-                                        Button::new("add-first-node", "Add step")
-                                            .icon(IconName::Plus)
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.add_node(cx)),
-                                            ),
+                        EmptyState::new(
+                            IconName::Sparkles,
+                            tr("No steps yet", "ステップはまだありません"),
+                        )
+                        .description(tr(
+                            "Ask the commander for a plan, or add a step and write it yourself.",
+                            "コマンダーに計画を頼むか、ステップを追加して自分で書いてください。",
+                        ))
+                        .action(
+                            div()
+                                .flex()
+                                .gap(theme.spacing.sm)
+                                .child(
+                                    Button::new("add-first-node", tr("Add step", "ステップを追加"))
+                                        .icon(IconName::Plus)
+                                        .on_click(cx.listener(|this, _, _, cx| this.add_node(cx))),
+                                )
+                                .child(
+                                    Button::new(
+                                        "ask-commander",
+                                        tr("Ask the commander", "コマンダーに頼む"),
                                     )
-                                    .child(
-                                        Button::new("ask-commander", "Ask the commander")
-                                            .variant(ButtonVariant::Agent)
-                                            .icon(IconName::Sparkles)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.panel_open = true;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
+                                    .variant(ButtonVariant::Agent)
+                                    .icon(IconName::Sparkles)
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.panel_open = true;
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        ),
                     ),
                 )
             })
