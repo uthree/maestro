@@ -52,6 +52,7 @@ impl Maestro {
     pub(crate) fn project_pane(&self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(project) = self.open_project() else { return div().into_any_element() };
+        let project_id = project.id;
         let workflows = self.mirror.workflows_of(project.id).count();
 
         let header = div()
@@ -295,12 +296,16 @@ impl Maestro {
                         div().flex().child(
                             Button::new(
                                 "delete-project",
-                                tr("Delete project", "プロジェクトを削除"),
+                                tr("Delete project…", "プロジェクトを削除…"),
                             )
                             .variant(ButtonVariant::Danger)
                             .icon(IconName::Trash)
                             .size(ControlSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.delete_project(cx))),
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.delete_project(project_id, window, cx);
+                                },
+                            )),
                         ),
                     ),
             );

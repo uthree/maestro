@@ -8,6 +8,7 @@ use atelier::{
     TextColor, TextField, TextSize, Tone,
 };
 use gpui::{Context, IntoElement, ParentElement, Pixels, Styled, div, prelude::*, px};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use maestro_client::mirror::AgentView;
 use maestro_core::{
     AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeRef, NodeStatus,
@@ -46,6 +47,7 @@ impl Maestro {
         let mut rows = Vec::new();
         for project in self.mirror.projects.values().rev() {
             let id = project.id;
+            let view = cx.entity();
             let open = self.project == Some(id);
             let flows: Vec<_> = self.mirror.workflows_of(id).rev().collect();
             let waiting = flows.iter().any(|flow| Progress::of(flow).waiting > 0);
@@ -53,33 +55,77 @@ impl Maestro {
                 .commander
                 .and_then(|agent| self.mirror.agents.get(&agent))
                 .is_some_and(|view| view.transcript.busy);
+            let row = ListItem::new(("project", id.0 as usize), project.name.clone())
+                .icon(if waiting { IconName::Alert } else { IconName::Folder })
+                .when(waiting, |item| item.icon_color(theme.colors.warning))
+                .description(if working {
+                    tr("The commander is working", "コマンダーが作業中").to_string()
+                } else {
+                    project_summary(
+                        project
+                            .resources
+                            .iter()
+                            .filter(|entry| {
+                                !matches!(entry.resource, maestro_core::Resource::Provider { .. })
+                            })
+                            .count(),
+                        flows.len(),
+                    )
+                })
+                .selected(open && !self.workflow_open)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enter_project(id);
+                    this.workflow_open = false;
+                    this.workflow_full = false;
+                    cx.notify();
+                }));
             rows.push(
-                ListItem::new(("project", id.0 as usize), project.name.clone())
-                    .icon(if waiting { IconName::Alert } else { IconName::Folder })
-                    .when(waiting, |item| item.icon_color(theme.colors.warning))
-                    .description(if working {
-                        tr("The commander is working", "コマンダーが作業中").to_string()
-                    } else {
-                        project_summary(
-                            project
-                                .resources
-                                .iter()
-                                .filter(|entry| {
-                                    !matches!(
-                                        entry.resource,
-                                        maestro_core::Resource::Provider { .. }
-                                    )
+                div()
+                    .id(("project-menu", id.0 as usize))
+                    .child(div().child(row).context_menu(move |menu, window, cx| {
+                        let open_view = view.clone();
+                        let resources_view = view.clone();
+                        let delete_view = view.clone();
+                        menu.min_w(cx.theme().typography.size_md * 16.)
+                            .when_some(window.focused(cx), |menu, focus| menu.action_context(focus))
+                            .item(PopupMenuItem::new(tr("Open", "開く")).on_click(
+                                move |_, _, cx| {
+                                    open_view.update(cx, |this, cx| {
+                                        this.enter_project(id);
+                                        this.workflow_open = false;
+                                        this.workflow_full = false;
+                                        this.resources_open = false;
+                                        cx.notify();
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new(tr("Show resources", "リソースを表示"))
+                                    .on_click(move |_, _, cx| {
+                                        resources_view.update(cx, |this, cx| {
+                                            this.enter_project(id);
+                                            this.resources_open = true;
+                                            this.workflow_open = false;
+                                            this.workflow_full = false;
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .separator()
+                            .item(
+                                PopupMenuItem::element(|_, _| {
+                                    Label::new(tr("Delete project…", "プロジェクトを削除…"))
+                                        .color(TextColor::Danger)
                                 })
-                                .count(),
-                            flows.len(),
-                        )
-                    })
-                    .selected(open && !self.workflow_open)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.enter_project(id);
-                        this.workflow_open = false;
-                        this.workflow_full = false;
-                        cx.notify();
+                                .on_click(move |_, window, cx| {
+                                    let view = delete_view.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.delete_project(id, window, cx)
+                                        });
+                                    });
+                                }),
+                            )
                     }))
                     .into_any_element(),
             );

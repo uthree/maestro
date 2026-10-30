@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_component::input::{Enter, Input, InputState};
 
-/// Gives gpui-component the Atelier theme's text, caret and selection colours.
+/// Gives gpui-component's inputs, menus and dialogs the Atelier theme's colours.
 pub fn follow_theme(cx: &mut App) {
     let theme = cx.theme().clone();
     let colors = &theme.colors;
@@ -31,6 +31,15 @@ pub fn follow_theme(cx: &mut App) {
     component.ring = colors.focus_ring;
     component.accent = colors.hover;
     component.muted = colors.sunken;
+    component.popover = colors.overlay;
+    component.popover_foreground = colors.text;
+    component.list = colors.overlay;
+    component.list_hover = colors.hover;
+    component.list_active = colors.selected;
+    component.danger = colors.danger;
+    component.danger_hover = colors.danger.opacity(0.9);
+    component.danger_active = colors.danger.opacity(0.8);
+    component.danger_foreground = theme.text_on(colors.danger);
 }
 
 /// Makes Shift+Enter start a new line in a multi-line field, so plain Enter can send.

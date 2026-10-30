@@ -18,6 +18,7 @@ use gpui::{
     ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::input::InputState;
+use gpui_component::{Root, WindowExt, dialog::DialogButtonProps};
 use maestro_client::mirror::Notice;
 use maestro_client::{Client, Launch, Mirror};
 use maestro_core::{
@@ -615,10 +616,44 @@ impl Maestro {
         self.command(Command::RenameProject { project, name }, cx);
     }
 
-    /// Deletes the open project and its workflows.
-    pub(crate) fn delete_project(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project else { return };
-        self.command(Command::DeleteProject { project }, cx);
+    /// Confirms deletion of the specified project and its workflows.
+    pub(crate) fn delete_project(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(found) = self.mirror.projects.get(&project) else { return };
+        let name = &found.name;
+        let title = trf!("Delete “{name}”?", "「{name}」を削除しますか？");
+        let workflows = self.mirror.workflows_of(project).count();
+        let message = trf!(
+            "This also deletes {workflows} workflows. Branches and worktrees stay. This cannot be undone.",
+            "ワークフロー {workflows} 件も削除されます。ブランチとワークツリーは残ります。この操作は取り消せません。"
+        );
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let view = view.clone();
+            dialog
+                .bg(cx.theme().colors.overlay)
+                .title(title.clone())
+                .child(message.clone())
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tr("Delete", "削除"))
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                        .cancel_text(tr("Cancel", "キャンセル")),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        if this.mirror.projects.contains_key(&project) {
+                            this.command(Command::DeleteProject { project }, cx);
+                        }
+                    });
+                    true
+                })
+        });
     }
 
     /// Adds the resource the pane's fields describe to the open project.
@@ -1112,5 +1147,6 @@ impl Render for Maestro {
             .child(self.title_bar(cx))
             .child(body)
             .child(self.footer(cx))
+            .children(Root::render_dialog_layer(window, cx))
     }
 }
