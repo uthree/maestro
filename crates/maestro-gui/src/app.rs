@@ -192,8 +192,8 @@ pub struct Maestro {
     pub(crate) node_tab: usize,
     /// The contender the worker tab shows, when the node ran on several models.
     pub(crate) contender: Option<AgentId>,
-    /// The CLI a new commander runs on.
-    pub(crate) provider: ProviderKind,
+    /// The model a new commander runs on.
+    pub(crate) commander: ModelChoice,
     /// The menu that is open, if any.
     pub(crate) menu: Option<Menu>,
     pub(crate) canvas: Canvas,
@@ -247,7 +247,12 @@ impl Maestro {
             window_width: px(0.),
             node_tab: 0,
             contender: None,
-            provider: ProviderKind::ClaudeCode,
+            commander: ModelChoice {
+                provider: ProviderKind::ClaudeCode,
+                model: String::new(),
+                grade: ModelGrade::Standard,
+                effort: Effort::Medium,
+            },
             menu: None,
             canvas: Canvas::default(),
             expanded: HashSet::new(),
@@ -436,10 +441,20 @@ impl Maestro {
         }
     }
 
-    /// The provider a new commander runs on: the one picked, if the project allows it.
-    pub(crate) fn commander_provider(&self) -> ProviderKind {
+    /// The model a new commander runs on: the one picked, if the project allows its provider,
+    /// else the default of the first provider it allows.
+    pub(crate) fn commander_model(&self) -> ModelChoice {
         let allowed = self.allowed_providers();
-        if allowed.contains(&self.provider) { self.provider } else { allowed[0] }
+        if allowed.contains(&self.commander.provider) {
+            self.commander.clone()
+        } else {
+            ModelChoice {
+                provider: allowed[0],
+                model: String::new(),
+                grade: ModelGrade::Standard,
+                effort: Effort::Medium,
+            }
+        }
     }
 
     /// Sends a command from a background task and hands its reply to `then`. A refusal is shown
@@ -596,16 +611,8 @@ impl Maestro {
                 .refuse(tr("Create a project first.", "先にプロジェクトを作成してください。"), cx);
         };
         input::clear(&self.fields.composer, window, cx);
-        let command = Command::StartCommander {
-            project,
-            model: ModelChoice {
-                provider: self.commander_provider(),
-                model: String::new(),
-                grade: ModelGrade::Standard,
-                effort: Effort::Medium,
-            },
-            prompt: text,
-        };
+        let command =
+            Command::StartCommander { project, model: self.commander_model(), prompt: text };
         self.request(command, cx, |this, reply, _| {
             if let Reply::AgentStarted { agent } = reply {
                 this.conversation = Some(agent);

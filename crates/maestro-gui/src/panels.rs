@@ -8,7 +8,8 @@ use atelier::{
     Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
 };
 use gpui::{
-    Context, Corner, IntoElement, ParentElement, Pixels, Styled, Window, div, prelude::*, px,
+    ClickEvent, Context, Corner, IntoElement, ParentElement, Pixels, Styled, Window, div,
+    prelude::*, px,
 };
 use maestro_client::mirror::AgentView;
 use maestro_core::{
@@ -410,41 +411,51 @@ impl Maestro {
         }
     }
 
-    /// What a node can be pinned to: the router's choice, or one provider.
+    /// What a node can be pinned to: the router's choice, or one model.
     fn runs_on_menu(
         &self,
         id: NodeId,
-        current: Option<ProviderKind>,
+        current: Option<&ModelChoice>,
         difficulty: Difficulty,
         cx: &mut Context<Self>,
     ) -> Popover {
-        let mut menu = Popover::new().id("runs-on-menu").w(px(240.));
-        for provider in std::iter::once(None).chain(ProviderKind::ALL.map(Some)) {
-            let item = match provider {
-                None => MenuItem::new("runs-on-auto", tr("Auto", "自動")).icon(IconName::Sparkles),
-                Some(provider) => {
-                    dropdown::provider_item(("runs-on-provider", provider as usize), provider)
-                }
-            };
-            let model = provider.map(|provider| ModelChoice {
-                provider,
-                model: String::new(),
-                grade: difficulty.grade(),
-                effort: difficulty.effort(),
-            });
-            menu = menu.child(item.checked(current == provider).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.menu = None;
-                    this.edit_node(
-                        id,
-                        NodeEdit { model: Some(model.clone()), ..NodeEdit::default() },
-                        cx,
-                    );
-                },
-            )));
-            // The router's choice stands apart from the providers.
-            if provider.is_none() {
-                menu = menu.child(menu_separator(cx));
+        let pin = move |model: Option<ModelChoice>| {
+            move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.menu = None;
+                this.edit_node(
+                    id,
+                    NodeEdit { model: Some(model.clone()), ..NodeEdit::default() },
+                    cx,
+                );
+            }
+        };
+        let mut menu = Popover::new().id("runs-on-menu").w(px(260.)).child(
+            MenuItem::new("runs-on-auto", tr("Auto", "自動"))
+                .icon(IconName::Sparkles)
+                .checked(current.is_none())
+                .on_click(cx.listener(pin(None))),
+        );
+        // The router's choice stands apart from the models.
+        menu = menu.child(menu_separator(cx));
+        let groups = dropdown::offers(&self.mirror.router.catalog, ProviderKind::ALL);
+        let mut index = 0usize;
+        for (group, (provider, offers)) in groups.into_iter().enumerate() {
+            menu = menu.child(dropdown::provider_caption(provider, group == 0));
+            for offer in offers {
+                let checked = current.is_some_and(|choice| offer.is(choice));
+                let model = ModelChoice {
+                    provider: offer.provider,
+                    // The CLI's default stands for whatever grade the step needs.
+                    grade: if offer.model.is_empty() { difficulty.grade() } else { offer.grade },
+                    model: offer.model.clone(),
+                    effort: difficulty.effort(),
+                };
+                menu = menu.child(
+                    dropdown::offer_item(("runs-on-model", index), &offer)
+                        .checked(checked)
+                        .on_click(cx.listener(pin(Some(model)))),
+                );
+                index += 1;
             }
         }
         menu
@@ -465,21 +476,23 @@ impl Maestro {
             |text: &'static str| Label::new(text).size(TextSize::Small).color(TextColor::Muted);
         let group = || div().flex().flex_col().gap(theme.spacing.xs);
         let difficulty = node.difficulty.unwrap_or(Difficulty::Moderate);
-        let runs_on = node.model.as_ref().map(|choice| choice.provider);
+        let runs_on = node.model.as_ref();
         let runs_on_button =
-            Button::new("runs-on", runs_on.map_or(tr("Auto", "自動"), ProviderKind::label))
-                .size(ControlSize::Small)
-                .icon(runs_on.map_or(IconName::Sparkles.into(), dropdown::provider_icon))
-                .icon_after(IconName::ChevronDown)
-                .selected(self.menu == Some(Menu::RunsOn(id)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.menu = if this.menu == Some(Menu::RunsOn(id)) {
-                        None
-                    } else {
-                        Some(Menu::RunsOn(id))
-                    };
-                    cx.notify();
-                }));
+            Button::new(
+                "runs-on",
+                runs_on.map_or(tr("Auto", "自動").to_string(), dropdown::choice_label),
+            )
+            .size(ControlSize::Small)
+            .icon(runs_on.map_or(IconName::Sparkles.into(), |choice| {
+                dropdown::provider_icon(choice.provider)
+            }))
+            .icon_after(IconName::ChevronDown)
+            .selected(self.menu == Some(Menu::RunsOn(id)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu =
+                    if this.menu == Some(Menu::RunsOn(id)) { None } else { Some(Menu::RunsOn(id)) };
+                cx.notify();
+            }));
         let runs_on_menu = (self.menu == Some(Menu::RunsOn(id))).then(|| {
             div().mt(px(4.)).child(dropdown::floating(
                 "runs-on-backdrop",

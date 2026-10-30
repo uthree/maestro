@@ -14,7 +14,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use maestro_client::mirror::{AgentView, Entry, ToolState};
-use maestro_core::{AgentId, NodeStatus, PermissionKind, ProviderKind, Workflow};
+use maestro_core::{AgentId, ModelChoice, NodeStatus, PermissionKind, ProviderKind, Workflow};
 use maestro_protocol::AgentStatus;
 
 use crate::app::{Maestro, Progress};
@@ -486,20 +486,27 @@ impl Maestro {
             .into_any_element()
     }
 
-    /// The providers a new commander can run on: those the project allows.
-    fn commander_menu(&self, current: ProviderKind, cx: &mut Context<Self>) -> Popover {
-        let allowed = self.allowed_providers();
-        Popover::new().id("commander-menu").w(px(220.)).children(allowed.into_iter().map(
-            |provider| {
-                dropdown::provider_item(("commander-provider", provider as usize), provider)
-                    .checked(provider == current)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.provider = provider;
-                        this.menu = None;
-                        cx.notify();
-                    }))
-            },
-        ))
+    /// The models a new commander can run on, grouped by the providers the project allows.
+    fn commander_menu(&self, current: &ModelChoice, cx: &mut Context<Self>) -> Popover {
+        let mut menu = Popover::new().id("commander-menu").w(px(260.));
+        let groups = dropdown::offers(&self.mirror.router.catalog, self.allowed_providers());
+        let mut index = 0usize;
+        for (group, (provider, offers)) in groups.into_iter().enumerate() {
+            menu = menu.child(dropdown::provider_caption(provider, group == 0));
+            for offer in offers {
+                let item = dropdown::offer_item(("commander-model", index), &offer)
+                    .checked(offer.is(current));
+                index += 1;
+                menu = menu.child(item.on_click(cx.listener(move |this, _, _, cx| {
+                    this.commander.provider = offer.provider;
+                    this.commander.model = offer.model.clone();
+                    this.commander.grade = offer.grade;
+                    this.menu = None;
+                    cx.notify();
+                })));
+            }
+        }
+        menu
     }
 
     /// The conversation with the commander: its transcript, the plans it wrote, and the
@@ -513,8 +520,8 @@ impl Maestro {
         let view = self
             .conversation
             .and_then(|agent| Some((agent, self.mirror.agents.get(&agent)?.clone())));
-        let provider =
-            view.as_ref().map_or(self.commander_provider(), |(_, view)| view.spec.model.provider);
+        let model =
+            view.as_ref().map_or(self.commander_model(), |(_, view)| view.spec.model.clone());
         let busy = view.as_ref().is_some_and(|(_, view)| view.transcript.busy);
         let fresh = view.is_none();
 
@@ -542,15 +549,15 @@ impl Maestro {
                     this.update(cx, |this, cx| this.send_to_commander(window, cx)).ok();
                 })
             })
-            .model(provider.label())
-            .model_logo(dropdown::provider_icon(provider))
+            .model(dropdown::choice_label(&model))
+            .model_logo(dropdown::provider_icon(model.provider))
             .busy(busy)
             // The daemon holds a message sent mid-turn until the turn ends.
             .queue(true)
             .on_send(cx.listener(|this, _, window, cx| this.send_to_commander(window, cx)))
             .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
             .when(fresh, |composer| {
-                // The provider is fixed once the conversation starts.
+                // The model is fixed once the conversation starts.
                 composer.on_model(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Commander) {
                         None
@@ -564,7 +571,7 @@ impl Maestro {
         let menu = (fresh && self.menu == Some(Menu::Commander)).then(|| {
             div().absolute().bottom(px(42.)).left(px(44.)).child(dropdown::floating(
                 "commander-menu-backdrop",
-                self.commander_menu(provider, cx),
+                self.commander_menu(&model, cx),
                 Corner::BottomLeft,
                 self.close_menu(cx),
                 window,
