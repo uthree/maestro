@@ -19,11 +19,13 @@ pub mod workflow;
 pub use agent::{AgentRole, AgentSpec};
 pub use event::{AgentEvent, PermissionKind, PermissionRequest, ToolCall};
 pub use id::{AgentId, NodeId, WorkflowId};
-pub use plan::{COMMANDER_INSTRUCTIONS, Plan, PlanError, PlanNode, WORKER_INSTRUCTIONS};
+pub use plan::{
+    COMMANDER_INSTRUCTIONS, Plan, PlanError, PlanNode, WORKER_INSTRUCTIONS, status_report,
+};
 pub use provider::{Effort, ModelChoice, ModelGrade, ProviderKind};
 pub use routing::{Catalog, Choice, Difficulty, ModelKey, ModelProfile, Outcome, Router, Weights};
 pub use target::{Host, Workspace, Worktree};
 pub use workflow::{
-    Edge, Node, NodeDraft, NodeEdit, NodeOrigin, NodeStatus, Workflow, WorkflowError,
+    Edge, Node, NodeDraft, NodeEdit, NodeOrigin, NodeRef, NodeStatus, Workflow, WorkflowError,
     WorkflowTarget,
 };

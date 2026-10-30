@@ -252,6 +252,22 @@ impl Maestro {
                     .into_any_element(),
             );
         }
+        // Sent during the turn; the agent reads them when it ends.
+        for (index, text) in view.transcript.queued.iter().enumerate() {
+            let key: SharedString = format!("{agent}-queued-{index}").into();
+            rows.push(
+                UserMessage::new(text.clone()).id(element("queued", &key)).into_any_element(),
+            );
+        }
+        if !view.transcript.queued.is_empty() {
+            rows.push(
+                ChatNotice::status(tr(
+                    "Sends when the current reply ends",
+                    "現在の返答が終わったら送信します",
+                ))
+                .into_any_element(),
+            );
+        }
         rows
     }
 
@@ -434,6 +450,8 @@ impl Maestro {
             .model(provider.label())
             .when_some(provider_logo(provider), Composer::model_logo)
             .busy(busy)
+            // The daemon holds a message sent mid-turn until the turn ends.
+            .queue(true)
             .on_send(cx.listener(|this, _, window, cx| this.send_to_commander(window, cx)))
             .on_stop(cx.listener(|this, _, _, cx| this.stop_commander(cx)))
             .when(fresh, |composer| {

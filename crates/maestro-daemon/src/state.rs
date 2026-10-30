@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use maestro_core::{NodeOrigin, Workflow, WorkflowError, WorkflowId};
+use maestro_core::{NodeOrigin, NodeRef, NodeStatus, Workflow, WorkflowError, WorkflowId};
 use maestro_protocol::{Command, CommandError, Event, Reply, WorkflowSummary};
 
 /// Every workflow the daemon knows about.
@@ -78,6 +78,17 @@ impl State {
                 let removed = self.workflow(workflow)?.remove_edge(from, to);
                 (Reply::Done, removed.then_some(workflow))
             }
+            Command::WaitFor { workflow, node, on } => {
+                if !self.contains(on) {
+                    return Err(CommandError::Workflow { message: format!("{on} does not exist") });
+                }
+                self.workflow(workflow)?.wait_for(node, on).map_err(refused)?;
+                (Reply::Done, Some(workflow))
+            }
+            Command::StopWaiting { workflow, node, on } => {
+                let stopped = self.workflow(workflow)?.stop_waiting(node, on);
+                (Reply::Done, stopped.then_some(workflow))
+            }
             Command::SetWorkflowTarget { workflow, target } => {
                 self.workflow(workflow)?.target = target;
                 (Reply::Done, Some(workflow))
@@ -109,19 +120,30 @@ impl State {
         })
     }
 
+    /// Whether `node` names a node that exists.
+    pub(crate) fn contains(&self, node: NodeRef) -> bool {
+        self.workflows.get(&node.workflow).is_some_and(|flow| flow.node(node.node).is_some())
+    }
+
+    /// The status of the node `node` names, if it exists.
+    pub(crate) fn status(&self, node: NodeRef) -> Option<NodeStatus> {
+        Some(self.workflows.get(&node.workflow)?.node(node.node)?.status)
+    }
+
     pub(crate) fn workflow(&mut self, workflow: WorkflowId) -> Result<&mut Workflow, CommandError> {
         self.workflows.get_mut(&workflow).ok_or(CommandError::UnknownWorkflow { workflow })
     }
 
-    /// Adds a workflow built for a fresh id, such as one from a commander's plan.
-    pub(crate) fn insert<E>(
-        &mut self,
-        build: impl FnOnce(WorkflowId) -> Result<Workflow, E>,
-    ) -> Result<&Workflow, E> {
-        let id = WorkflowId(self.next_workflow + 1);
-        let workflow = build(id)?;
+    /// The id the next workflow gets.
+    pub(crate) fn next_id(&self) -> WorkflowId {
+        WorkflowId(self.next_workflow + 1)
+    }
+
+    /// Adds a workflow built for [`State::next_id`], such as one from a commander's plan.
+    pub(crate) fn insert(&mut self, workflow: Workflow) -> &Workflow {
+        debug_assert_eq!(workflow.id, self.next_id());
         self.next_workflow += 1;
-        Ok(self.workflows.entry(id).or_insert(workflow))
+        self.workflows.entry(workflow.id).or_insert(workflow)
     }
 }
 
@@ -166,6 +188,18 @@ mod tests {
             state.apply(Command::AddEdge { workflow, from: NodeId(2), to: NodeId(1) });
         assert!(matches!(result, Err(CommandError::Workflow { .. })));
         assert!(events.is_empty());
+
+        // A node waits only on a node of an earlier workflow that exists.
+        state.apply(Command::CreateWorkflow { title: "later".into() }).0.unwrap();
+        let on = NodeRef { workflow, node: NodeId(2) };
+        let later = WorkflowId(2);
+        state.apply(Command::AddNode { workflow: later, node: draft("c") }).0.unwrap();
+        let wait = |on| Command::WaitFor { workflow: later, node: NodeId(1), on };
+        assert!(state.apply(wait(NodeRef { workflow, node: NodeId(9) })).0.is_err());
+        assert!(state.apply(Command::WaitFor { workflow, node: NodeId(1), on }).0.is_err());
+        let (result, events) = state.apply(wait(on));
+        assert_eq!((result, events.len()), (Ok(Reply::Done), 1));
+        assert!(state.contains(on) && state.status(on) == Some(NodeStatus::Pending));
 
         let (result, _) = state.apply(Command::GetWorkflow { workflow: WorkflowId(5) });
         assert_eq!(result, Err(CommandError::UnknownWorkflow { workflow: WorkflowId(5) }));

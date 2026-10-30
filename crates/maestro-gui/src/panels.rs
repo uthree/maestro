@@ -10,7 +10,8 @@ use atelier::{
 use gpui::{Context, IntoElement, ParentElement, Pixels, Styled, div, prelude::*, px};
 use maestro_client::mirror::AgentView;
 use maestro_core::{
-    AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeStatus, ProviderKind,
+    AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeRef, NodeStatus,
+    ProviderKind,
 };
 
 use crate::app::{Maestro, Progress};
@@ -455,6 +456,27 @@ impl Maestro {
                     .collect()
             })
             .unwrap_or_default();
+        // Earlier work it waits for, in other workflows.
+        let waiting: Vec<(NodeRef, String)> = node
+            .after
+            .iter()
+            .map(|&on| {
+                let earlier = self.mirror.workflows.get(&on.workflow);
+                let title = earlier.and_then(|flow| Some((flow, flow.node(on.node)?)));
+                let title = match title {
+                    Some((flow, node)) => {
+                        trf!(
+                            "{} (in \u{201c}{}\u{201d})",
+                            "{}（\u{300c}{}\u{300d}）",
+                            node.title,
+                            flow.title
+                        )
+                    }
+                    None => on.to_string(),
+                };
+                (on, title)
+            })
+            .collect();
         let rating = self.workflow.and_then(|workflow| self.ratings.get(&(workflow, id)).copied());
         let origin = match node.origin {
             NodeOrigin::Commander => tr("Planned by the commander", "コマンダーが計画"),
@@ -568,7 +590,7 @@ impl Maestro {
             .child(
                 group()
                     .child(label(tr("Waits for", "待機先")))
-                    .when(dependencies.is_empty(), |list| {
+                    .when(dependencies.is_empty() && waiting.is_empty(), |list| {
                         list.child(
                             Label::new(tr("Nothing; it can start first", "なし。最初に開始できます"))
                                 .size(TextSize::Small)
@@ -583,6 +605,16 @@ impl Maestro {
                                     .size(ControlSize::Small)
                                     .tooltip(tr("Stop waiting for this step", "このステップを待たない"))
                                     .on_click(cx.listener(move |this, _, _, cx| this.disconnect_nodes(dep, id, cx))),
+                            )
+                    }))
+                    .children(waiting.into_iter().enumerate().map(|(index, (on, title))| {
+                        ListItem::new(("waiting", index), title)
+                            .icon(IconName::ChevronRight)
+                            .trailing(
+                                Button::icon_only(("drop-waiting", index), IconName::Close)
+                                    .size(ControlSize::Small)
+                                    .tooltip(tr("Stop waiting for this step", "このステップを待たない"))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.stop_waiting(id, on, cx))),
                             )
                     })),
             )
@@ -659,6 +691,8 @@ impl Maestro {
                         .model(trf!("{} · worker", "{} · ワーカー", provider.label()))
                         .when_some(provider_logo(provider), Composer::model_logo)
                         .busy(busy)
+                        // The daemon holds a message sent mid-turn until the turn ends.
+                        .queue(true)
                         .on_send(cx.listener(|this, _, window, cx| this.send_to_node(window, cx)))
                         .on_stop(cx.listener(move |this, _, _, cx| this.interrupt(agent, cx))),
                 )),
