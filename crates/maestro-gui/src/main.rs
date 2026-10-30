@@ -3,16 +3,20 @@
 //!
 //! ```text
 //! maestro [--ssh DESTINATION] [--daemon PROGRAM] [--repo PATH] [--base BRANCH]
-//!         [--appearance dark|light] [--direction glass|studio|mono]
+//!         [--appearance dark|light] [--direction glass|studio|mono] [--lang en|ja]
 //! ```
 //!
 //! With `--ssh` the daemon, the repository and every agent are on that machine and only the
 //! window is here, and that machine needs `maestro-daemon` installed. Without it the daemon runs
 //! on this machine from this same executable (`maestro --stdio`, `maestro serve`), so it starts
 //! by itself and always speaks this window's protocol.
+//!
+//! The window speaks English or Japanese: `--lang`, else `MAESTRO_LANG`, else the system's
+//! language.
 
 mod app;
 mod graph;
+mod i18n;
 mod input;
 mod link;
 mod panels;
@@ -67,6 +71,9 @@ fn main() -> ExitCode {
         return maestro_daemon::resident::run(&args);
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    if let Some(lang) = argument("--lang").and_then(|tag| i18n::Lang::from_tag(&tag)) {
+        i18n::set(lang);
+    }
     let launch = launch();
     let project = Project::new(
         argument("--repo").map(PathBuf::from),

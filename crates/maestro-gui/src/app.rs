@@ -28,7 +28,8 @@ use maestro_core::{
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
 use crate::graph::Canvas;
-use crate::{input, link};
+use crate::i18n::tr;
+use crate::{input, link, trf};
 
 /// Narrowest window that still shows the sidebar.
 const SIDEBAR_MIN_WINDOW: f32 = 1180.;
@@ -131,10 +132,28 @@ impl Maestro {
     ) -> Self {
         let repository = project.repository.as_ref().map(|path| path.display().to_string());
         let fields = Fields {
-            composer: input::area("Describe what to build…", "", 8, window, cx),
-            node_message: input::area("Ask this worker for changes…", "", 6, window, cx),
-            title: input::line("Step name", "", window, cx),
-            instructions: input::area("What the worker should do", "", 12, window, cx),
+            composer: input::area(
+                tr("Describe what to build…", "作りたいものを説明してください…"),
+                "",
+                8,
+                window,
+                cx,
+            ),
+            node_message: input::area(
+                tr("Ask this worker for changes…", "このワーカーへの修正依頼…"),
+                "",
+                6,
+                window,
+                cx,
+            ),
+            title: input::line(tr("Step name", "ステップ名"), "", window, cx),
+            instructions: input::area(
+                tr("What the worker should do", "ワーカーにやってほしいこと"),
+                "",
+                12,
+                window,
+                cx,
+            ),
             repository: input::line(
                 "/path/to/repository",
                 &repository.unwrap_or_default(),
@@ -200,8 +219,13 @@ impl Maestro {
                 }
             }
             this.update(cx, |this, cx| {
-                this.connection =
-                    Connection::Lost("The daemon disconnected. Try again to reconnect.".into());
+                this.connection = Connection::Lost(
+                    tr(
+                        "The daemon disconnected. Try again to reconnect.",
+                        "デーモンとの接続が切れました。再試行すると再接続します。",
+                    )
+                    .into(),
+                );
                 cx.notify();
             })
             .ok();
@@ -233,7 +257,8 @@ impl Maestro {
         then: impl FnOnce(&mut Self, Reply, &mut Context<Self>) + 'static,
     ) {
         let Connection::Ready(client) = &self.connection else {
-            self.error = Some("Not connected to the daemon.".into());
+            self.error =
+                Some(tr("Not connected to the daemon.", "デーモンに接続していません。").into());
             cx.notify();
             return;
         };
@@ -325,7 +350,13 @@ impl Maestro {
         }
         self.read_project(cx);
         let Some(target) = self.project.target() else {
-            self.error = Some("Choose the repository the commander should plan for.".into());
+            self.error = Some(
+                tr(
+                    "Choose the repository the commander should plan for.",
+                    "コマンダーに計画させるリポジトリを選んでください。",
+                )
+                .into(),
+            );
             cx.notify();
             return;
         };
@@ -379,7 +410,9 @@ impl Maestro {
 
     pub(crate) fn new_workflow(&mut self, cx: &mut Context<Self>) {
         self.request(
-            Command::CreateWorkflow { title: "Untitled workflow".into() },
+            Command::CreateWorkflow {
+                title: tr("Untitled workflow", "無題のワークフロー").into()
+            },
             cx,
             |this, reply, _| {
                 if let Reply::WorkflowCreated { workflow } = reply {
@@ -398,7 +431,13 @@ impl Maestro {
         }
         self.read_project(cx);
         let Some(target) = self.project.target() else {
-            self.error = Some("Choose the repository this workflow should run in.".into());
+            self.error = Some(
+                tr(
+                    "Choose the repository this workflow should run in.",
+                    "このワークフローを実行するリポジトリを選んでください。",
+                )
+                .into(),
+            );
             return;
         };
         self.request(
@@ -423,7 +462,13 @@ impl Maestro {
             self.project.target()
         });
         let Some(mut target) = target else {
-            self.error = Some("Choose the repository this workflow should run in.".into());
+            self.error = Some(
+                tr(
+                    "Choose the repository this workflow should run in.",
+                    "このワークフローを実行するリポジトリを選んでください。",
+                )
+                .into(),
+            );
             return;
         };
         target.publish = publish;
@@ -436,7 +481,13 @@ impl Maestro {
         let publish = flow.target.as_ref().is_some_and(|target| target.publish);
         self.read_project(cx);
         let Some(mut target) = self.project.target() else {
-            self.error = Some("Choose the repository this workflow should run in.".into());
+            self.error = Some(
+                tr(
+                    "Choose the repository this workflow should run in.",
+                    "このワークフローを実行するリポジトリを選んでください。",
+                )
+                .into(),
+            );
             return;
         };
         target.publish = publish;
@@ -446,7 +497,7 @@ impl Maestro {
     pub(crate) fn add_node(&mut self, cx: &mut Context<Self>) {
         let Some(workflow) = self.workflow else { return };
         let node = NodeDraft {
-            title: "New step".into(),
+            title: tr("New step", "新しいステップ").into(),
             instructions: String::new(),
             model: None,
             difficulty: Some(Difficulty::Moderate),
@@ -559,7 +610,11 @@ impl Maestro {
         TitleBar::new()
             .leading(
                 Button::icon_only("toggle-sidebar", IconName::SidebarLeft)
-                    .tooltip(if self.sidebar_open { "Hide sidebar" } else { "Show sidebar" })
+                    .tooltip(if self.sidebar_open {
+                        tr("Hide sidebar", "サイドバーを隠す")
+                    } else {
+                        tr("Show sidebar", "サイドバーを表示")
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sidebar_open = !this.sidebar_open;
                         cx.notify();
@@ -569,13 +624,13 @@ impl Maestro {
             .subtitle(subtitle)
             .when(flow.is_some(), |bar| {
                 bar.child(if finished {
-                    Button::new("publish", "Open pull request")
+                    Button::new("publish", tr("Open pull request", "プルリクエストを作成"))
                         .primary()
                         .icon(IconName::ArrowUp)
                         .size(ControlSize::Small)
                         .on_click(cx.listener(|this, _, _, cx| this.publish(cx)))
                 } else {
-                    Button::new("run", "Run")
+                    Button::new("run", tr("Run", "実行"))
                         .primary()
                         .icon(IconName::Play)
                         .size(ControlSize::Small)
@@ -585,14 +640,16 @@ impl Maestro {
             })
             .when(waiting > 0, |bar| {
                 bar.child(
-                    Badge::new(format!("{waiting} waiting for you"))
+                    Badge::new(trf!("{waiting} waiting for you", "{waiting} 件があなた待ち"))
                         .tone(Tone::Warning)
                         .icon(IconName::Alert),
                 )
             })
             .when(failed > 0, |bar| {
                 bar.child(
-                    Badge::new(format!("{failed} failed")).tone(Tone::Danger).icon(IconName::Alert),
+                    Badge::new(trf!("{failed} failed", "{failed} 件失敗"))
+                        .tone(Tone::Danger)
+                        .icon(IconName::Alert),
                 )
             })
             .trailing(
@@ -608,9 +665,15 @@ impl Maestro {
         let theme = cx.theme();
         let place = link::describe(&self.launch);
         let (connection, tone) = match &self.connection {
-            Connection::Connecting => (format!("Connecting to {place}…"), Tone::Neutral),
-            Connection::Ready(_) => (format!("Connected to {place}"), Tone::Success),
-            Connection::Lost(_) => (format!("Not connected to {place}"), Tone::Danger),
+            Connection::Connecting => {
+                (trf!("Connecting to {place}…", "{place}に接続中…"), Tone::Neutral)
+            }
+            Connection::Ready(_) => {
+                (trf!("Connected to {place}", "{place}に接続済み"), Tone::Success)
+            }
+            Connection::Lost(_) => {
+                (trf!("Not connected to {place}", "{place}に未接続"), Tone::Danger)
+            }
         };
         let working = self
             .mirror
@@ -621,15 +684,20 @@ impl Maestro {
             })
             .count();
         let notice = self.mirror.notices.last().map(|notice| match notice {
-            Notice::PlanRejected { message, .. } => {
-                (format!("Plan not used: {message}"), Tone::Warning)
-            }
+            Notice::PlanRejected { message, .. } => (
+                trf!("Plan not used: {message}", "計画は採用されませんでした: {message}"),
+                Tone::Warning,
+            ),
             Notice::NodeFailed { node, message, .. } => {
-                (format!("{node} failed: {message}"), Tone::Danger)
+                (trf!("{node} failed: {message}", "{node} が失敗しました: {message}"), Tone::Danger)
             }
-            Notice::Published { number, url, .. } => {
-                (format!("Opened pull request #{number}: {url}"), Tone::Success)
-            }
+            Notice::Published { number, url, .. } => (
+                trf!(
+                    "Opened pull request #{number}: {url}",
+                    "プルリクエスト #{number} を作成しました: {url}"
+                ),
+                Tone::Success,
+            ),
         });
         div()
             .flex()
@@ -644,10 +712,10 @@ impl Maestro {
             .child(Badge::new(connection).tone(tone).dot())
             .when(working > 0, |row| {
                 row.child(
-                    Label::new(format!(
-                        "{working} worker{} running",
-                        if working == 1 { "" } else { "s" }
-                    ))
+                    Label::new(match working {
+                        1 => tr("1 worker running", "1 体のワーカーが作業中").to_string(),
+                        _ => trf!("{working} workers running", "{working} 体のワーカーが作業中"),
+                    })
                     .size(TextSize::XSmall)
                     .color(TextColor::Muted),
                 )
@@ -671,7 +739,7 @@ impl Maestro {
                             .truncate(),
                     )
                     .child(
-                        Button::new("dismiss-error", "Dismiss")
+                        Button::new("dismiss-error", tr("Dismiss", "閉じる"))
                             .ghost()
                             .size(ControlSize::Small)
                             .on_click(cx.listener(|this, _, _, cx| {
