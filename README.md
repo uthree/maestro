@@ -48,7 +48,11 @@ Install `maestro-daemon` on the server, on its `PATH`, along with the agent CLIs
 `gh` (signed in) if pull requests are wanted. A frontend then connects with
 `Launch::ssh("user@server")`: it runs `ssh user@server maestro-daemon --stdio`, which starts the
 resident daemon the first time and relays to it after that. The daemon keeps running, and its
-agents keep working, when the frontend disconnects. Its socket and pid file are in
+agents keep working, when the frontend disconnects. Once no frontend has been connected and no
+agent has been in the middle of a turn for ten minutes (`serve --idle SECONDS` changes this, `0`
+keeps it running), it saves its state, stops its agents and exits; the next frontend starts it
+again with every workflow and transcript, and a message to a finished step starts a new worker in
+that step's worktree. Its socket and pid file are in
 `$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`). After an upgrade, the first `--stdio` relay that
 finds the old daemon still running, speaking an older protocol, stops it and starts its own.
 
@@ -56,7 +60,7 @@ The daemon keeps its model catalog and the record of past work in `$MAESTRO_HOME
 `~/.maestro/`). `router.json` lists the models the commander may choose from, with any benchmark
 scores you want it to weigh; it is written as a template the first time and is yours to edit.
 `outcomes.json` records how each node went (success, time, revisions, your rating) and is what
-the router learns from.
+the router learns from. `state.json` holds the workflows and transcripts, saved as they change.
 
 To check an adapter against a CLI installed on a machine:
 

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use maestro_client::{Client, Launch};
 use maestro_core::{
-    Effort, Host, ModelChoice, ModelGrade, NodeId, NodeStatus, ProviderKind, Workflow,
+    AgentEvent, Effort, Host, ModelChoice, ModelGrade, NodeId, NodeStatus, ProviderKind, Workflow,
     WorkflowTarget, Workspace,
 };
 use maestro_daemon::Hub;
@@ -166,6 +166,25 @@ fn a_plan_runs_to_the_end_in_dependency_order() {
     until(&events, |flow| status(flow, 1) == NodeStatus::Succeeded);
     assert!(first.join("maestro-wf1-n1.revised").exists());
     assert!(git(&first, &["status", "--porcelain"]).is_empty());
+
+    // A node whose worker has exited, as after the daemon stopped, gets a new worker in the
+    // same worktree.
+    let gone = done.node(NodeId(2)).unwrap().agent.unwrap();
+    client.request(Command::StopAgent { agent: gone }).unwrap();
+    loop {
+        match events.recv_timeout(Duration::from_secs(20)).expect("the worker to exit") {
+            Event::Agent { agent, event: AgentEvent::Exited { .. } } if agent == gone => break,
+            _ => {}
+        }
+    }
+    client
+        .request(Command::SendToNode { workflow, node: NodeId(2), text: "Once more".into() })
+        .unwrap();
+    until(&events, |flow| status(flow, 2) == NodeStatus::Running);
+    let revived = until(&events, |flow| status(flow, 2) == NodeStatus::Succeeded);
+    assert_ne!(revived.node(NodeId(2)).unwrap().agent, Some(gone));
+    assert_eq!(git(&second, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "maestro/wf1-n2");
+    assert!(git(&second, &["status", "--porcelain"]).is_empty());
 
     client.request(Command::RateNode { workflow, node: NodeId(1), rating: 5 }).unwrap();
     assert!(client.request(Command::RateNode { workflow, node: NodeId(1), rating: 9 }).is_err());

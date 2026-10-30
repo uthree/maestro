@@ -76,7 +76,7 @@ impl Store {
     }
 }
 
-fn read<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+pub(crate) fn read<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(io::Error::other),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -85,7 +85,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
 }
 
 /// Writes through a temporary file, so a crash never leaves half a file behind.
-fn write<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+pub(crate) fn write<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, serde_json::to_vec_pretty(value).map_err(io::Error::other)?)?;
     std::fs::rename(temporary, path)

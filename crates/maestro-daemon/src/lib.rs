@@ -12,6 +12,7 @@
 mod engine;
 pub mod resident;
 mod runtime;
+mod snapshot;
 mod state;
 mod store;
 
@@ -20,6 +21,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use maestro_protocol::{
     ClientMessage, CommandError, Event, FrameError, PROTOCOL_VERSION, ServerMessage, read_message,
@@ -28,8 +30,15 @@ use maestro_protocol::{
 
 use engine::Job;
 use runtime::Runtime;
+use snapshot::Snapshot;
 pub use state::State;
 use store::Store;
+
+/// The file in the daemon's home that holds its workflows and transcripts.
+const STATE_FILE: &str = "state.json";
+
+/// How often a change is written out; a crash loses at most this much.
+const SAVE_EVERY: Duration = Duration::from_secs(1);
 
 /// Shared state, the runtime, the engine, and the outgoing queue of every connection.
 #[derive(Clone)]
@@ -47,6 +56,8 @@ impl Default for Hub {
 }
 
 pub(crate) fn broadcast(inner: &mut Inner, event: &Event) {
+    // Every change reaches the frontends as an event, so every change is one to save.
+    inner.changed = true;
     inner.connections.retain(|(_, connection)| {
         connection.send(ServerMessage::Event { event: event.clone() }).is_ok()
     });
@@ -57,6 +68,8 @@ pub(crate) struct Inner {
     pub(crate) state: State,
     connections: Vec<(u64, Sender<ServerMessage>)>,
     next_connection: u64,
+    /// Whether anything happened since the last save.
+    changed: bool,
 }
 
 impl Hub {
@@ -65,9 +78,51 @@ impl Hub {
         Self::default()
     }
 
-    /// A hub that keeps the router's catalog and its record of outcomes in `home`.
+    /// A hub that keeps the router's catalog, its record of outcomes, and its workflows and
+    /// transcripts in `home`, and takes back what was saved there before.
     pub fn open(home: &Path) -> io::Result<Self> {
-        Ok(Self::with_store(Store::open(home)?))
+        let store = Store::open(home)?;
+        let path = home.join(STATE_FILE);
+        let snapshot = store::read::<Snapshot>(&path)?.unwrap_or_default().settle();
+        let hub = Self::with_store(store);
+        hub.inner.lock().expect("hub lock").state = State::restore(snapshot.workflows);
+        hub.runtime.restore(snapshot.agents);
+        let saving = hub.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(SAVE_EVERY);
+                if let Err(error) = saving.save_changes(&path) {
+                    eprintln!("maestro-daemon: could not save the state: {error}");
+                }
+            }
+        });
+        Ok(hub)
+    }
+
+    /// Writes the state to `path` if anything changed since the last time.
+    fn save_changes(&self, path: &Path) -> io::Result<()> {
+        let workflows = {
+            let mut inner = self.inner.lock().expect("hub lock");
+            if !std::mem::take(&mut inner.changed) {
+                return Ok(());
+            }
+            inner.state.workflows()
+        };
+        let snapshot = Snapshot { workflows, agents: self.runtime.saved() };
+        store::write(path, &snapshot)
+    }
+
+    /// Whether nothing needs the hub: no frontend is connected and no agent is in a turn or
+    /// waiting for an answer.
+    pub fn idle(&self) -> bool {
+        self.inner.lock().expect("hub lock").connections.is_empty() && !self.runtime.busy()
+    }
+
+    /// Stops every agent and saves the state to `home`, for a daemon about to exit.
+    pub fn shut_down(&self, home: &Path) -> io::Result<()> {
+        self.runtime.stop_all();
+        self.inner.lock().expect("hub lock").changed = true;
+        self.save_changes(&home.join(STATE_FILE))
     }
 
     fn with_store(store: Store) -> Self {

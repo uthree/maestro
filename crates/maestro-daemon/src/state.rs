@@ -11,6 +11,18 @@ pub struct State {
 }
 
 impl State {
+    /// The state holding `workflows`, as a snapshot saved them; new workflows get later ids.
+    pub(crate) fn restore(workflows: Vec<Workflow>) -> Self {
+        let next_workflow = workflows.iter().map(|flow| flow.id.0).max().unwrap_or(0);
+        let workflows = workflows.into_iter().map(|flow| (flow.id, flow)).collect();
+        Self { workflows, next_workflow }
+    }
+
+    /// Every workflow, for a snapshot.
+    pub(crate) fn workflows(&self) -> Vec<Workflow> {
+        self.workflows.values().cloned().collect()
+    }
+
     /// Applies one command. On failure nothing has changed and no events are returned.
     pub fn apply(&mut self, command: Command) -> (Result<Reply, CommandError>, Vec<Event>) {
         match self.dispatch(command) {
