@@ -2,6 +2,9 @@
 # Nothing below `maestro-client` knows a UI exists; the gpui and ratatui frontends arrive later.
 [workspace]
 members = ["crates/*"]
+# Plain `cargo run` at the root opens the desktop app. Use `--workspace` to build or test the
+# rest, as CI and CLAUDE.md do.
+default-members = ["crates/maestro-gui"]
 resolver = "3"
 
 [workspace.package]
