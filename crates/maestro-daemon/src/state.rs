@@ -78,6 +78,7 @@ impl State {
             }
             Command::StartAgent { .. }
             | Command::ListAgents
+            | Command::GetTranscript { .. }
             | Command::SendToAgent { .. }
             | Command::AnswerPermission { .. }
             | Command::InterruptAgent { .. }

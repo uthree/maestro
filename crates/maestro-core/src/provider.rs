@@ -10,7 +10,7 @@ pub enum ProviderKind {
     ClaudeCode,
     /// OpenAI's `codex`.
     Codex,
-    /// Google's `antigravity`.
+    /// Google's Antigravity CLI, `agy`.
     Antigravity,
     /// The open-source `opencode`, which itself fronts many model vendors.
     OpenCode,
@@ -68,6 +68,18 @@ pub enum Effort {
     High,
     /// The most the provider offers.
     Max,
+}
+
+impl Effort {
+    /// The name a person reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low effort",
+            Self::Medium => "Medium effort",
+            Self::High => "High effort",
+            Self::Max => "Max effort",
+        }
+    }
 }
 
 /// A concrete model on a concrete provider, at a chosen effort.

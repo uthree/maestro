@@ -48,6 +48,12 @@ pub struct PermissionRequest {
 pub enum AgentEvent {
     /// The process is up and has accepted its first instructions.
     Started,
+    /// A message was sent to the agent: its first prompt or a later one. Maestro reports this,
+    /// not the CLI, so that every frontend's transcript holds both sides of the conversation.
+    Prompted {
+        /// The message.
+        text: String,
+    },
     /// Part of the reply the user reads.
     Text {
         /// The new text.

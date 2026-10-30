@@ -16,8 +16,31 @@ crates/maestro-host      processes on a host (local or over `ssh`), git worktree
 crates/maestro-agents    adapters for Claude Code, Codex, Antigravity CLI and OpenCode, and the
                          session that runs one as a worker
 crates/maestro-daemon    owns all state; `serve` is the resident daemon, `--stdio` relays to it
-crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`
+crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`, and
+                         keeps the frontend's copy of the daemon's state
+crates/maestro-gui       the desktop app (`maestro`), built with gpui and Atelier
 ```
+
+## The desktop app
+
+```sh
+cargo run -p maestro-gui -- --repo path/to/repository             # daemon on this machine
+cargo run -p maestro-gui -- --ssh user@server --repo /srv/repo    # daemon, repository and agents on a server
+```
+
+On this machine the daemon is part of the `maestro` executable and starts by itself, so there is
+nothing else to build, start or stop. With `--ssh`, the server needs `maestro-daemon` installed
+(see below).
+
+Ask the commander what to build in the panel on the right. Its plan appears as a graph of steps;
+edit them (title, instructions, difficulty, provider, dependencies), then press Run. Select a
+step to see its worker, answer its permission requests, or ask it for changes. When every step
+has succeeded, "Open pull request" merges them and opens one pull request.
+
+`--appearance light` and `--direction studio|mono` change the theme. On Linux, building needs
+the X11, Wayland and Vulkan headers (`libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+libxcb1-dev libx11-xcb-dev` on Debian and Ubuntu), and the window needs a window manager or
+compositor to draw.
 
 ## Running the daemon on a server
 
@@ -26,7 +49,8 @@ Install `maestro-daemon` on the server, on its `PATH`, along with the agent CLIs
 `Launch::ssh("user@server")`: it runs `ssh user@server maestro-daemon --stdio`, which starts the
 resident daemon the first time and relays to it after that. The daemon keeps running, and its
 agents keep working, when the frontend disconnects. Its socket and pid file are in
-`$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`).
+`$XDG_RUNTIME_DIR/maestro/` (or `~/.maestro/`). After an upgrade, the first `--stdio` relay that
+finds the old daemon still running, speaking an older protocol, stops it and starts its own.
 
 The daemon keeps its model catalog and the record of past work in `$MAESTRO_HOME` (default
 `~/.maestro/`). `router.json` lists the models the commander may choose from, with any benchmark

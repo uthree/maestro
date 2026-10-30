@@ -18,6 +18,7 @@ maestro-daemon = { path = "crates/maestro-daemon", version = "0.1.0" }
 maestro-client = { path = "crates/maestro-client", version = "0.1.0" }
 maestro-host = { path = "crates/maestro-host", version = "0.1.0" }
 maestro-agents = { path = "crates/maestro-agents", version = "0.1.0" }
+maestro-gui = { path = "crates/maestro-gui", version = "0.1.0" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

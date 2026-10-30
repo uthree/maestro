@@ -10,6 +10,8 @@
 //! * [`Launch::Ssh`] starts it on another machine through the system `ssh`, so the user's own
 //!   config, keys and agent apply and Maestro never handles a credential.
 
+pub mod mirror;
+
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, Command as Process, Stdio};
@@ -26,6 +28,8 @@ use maestro_protocol::{
     ServerMessage, read_message, write_message,
 };
 use thiserror::Error;
+
+pub use mirror::Mirror;
 
 /// The daemon executable's name when none is given.
 pub const DAEMON: &str = "maestro-daemon";

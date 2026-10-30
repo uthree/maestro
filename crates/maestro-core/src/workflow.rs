@@ -349,6 +349,19 @@ impl Workflow {
             .collect()
     }
 
+    /// How many steps of dependencies stand before each node: 0 for a node that waits for
+    /// nothing, and one more than its deepest dependency otherwise. Graph views lay nodes out
+    /// in columns by it, so every edge points the same way.
+    pub fn depths(&self) -> BTreeMap<NodeId, usize> {
+        let mut depths = BTreeMap::new();
+        for id in self.topological_order() {
+            let depth =
+                self.dependencies(id).filter_map(|dep| depths.get(&dep)).max().map_or(0, |d| d + 1);
+            depths.insert(id, depth);
+        }
+        depths
+    }
+
     /// Every node, each after all of its dependencies; ties broken by id so the order is stable.
     pub fn topological_order(&self) -> Vec<NodeId> {
         let mut waiting: BTreeMap<NodeId, usize> = self.nodes.keys().map(|&id| (id, 0)).collect();
@@ -430,6 +443,15 @@ mod tests {
     fn orders_every_node_after_its_dependencies() {
         let (flow, [a, b, c, d]) = diamond();
         assert_eq!(flow.topological_order(), vec![a, b, c, d]);
+    }
+
+    #[test]
+    fn depth_counts_the_longest_chain_of_dependencies() {
+        let (mut flow, [a, b, c, d]) = diamond();
+        let e = flow.add_node(draft("e"));
+        flow.add_edge(a, d).unwrap();
+        let depths = flow.depths();
+        assert_eq!([depths[&a], depths[&b], depths[&c], depths[&d], depths[&e]], [0, 1, 1, 2, 0]);
     }
 
     #[test]

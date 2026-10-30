@@ -23,6 +23,8 @@ struct Agent {
     spec: AgentSpec,
     status: AgentStatus,
     session: Option<AgentSession>,
+    /// Every event so far, for frontends that connect later.
+    transcript: Vec<AgentEvent>,
 }
 
 pub(crate) struct Runtime {
@@ -56,6 +58,7 @@ impl Runtime {
             command,
             Command::StartAgent { .. }
                 | Command::ListAgents
+                | Command::GetTranscript { .. }
                 | Command::SendToAgent { .. }
                 | Command::AnswerPermission { .. }
                 | Command::InterruptAgent { .. }
@@ -83,7 +86,17 @@ impl Runtime {
                     .collect();
                 Ok(Reply::Agents { agents })
             }
+            Command::GetTranscript { agent } => {
+                let agents = self.agents.lock().expect("agents lock");
+                let entry = agents.get(&agent).ok_or(CommandError::UnknownAgent { agent })?;
+                Ok(Reply::Transcript { events: entry.transcript.clone() })
+            }
             Command::SendToAgent { agent, text } => {
+                if !self.agents.lock().expect("agents lock").contains_key(&agent) {
+                    return Err(CommandError::UnknownAgent { agent });
+                }
+                // Reported before it is sent, so that it precedes the reply in every transcript.
+                self.observe(agent, AgentEvent::Prompted { text: text.clone() });
                 self.with_session(agent, Some(AgentStatus::Working), |session| session.send(text))
             }
             Command::AnswerPermission { agent, request, allow } => {
@@ -137,8 +150,18 @@ impl Runtime {
         let agent = AgentId(self.next_agent.fetch_add(1, Ordering::Relaxed));
         self.agents.lock().expect("agents lock").insert(
             agent,
-            Agent { spec: spec.clone(), status: AgentStatus::Working, session: None },
+            Agent {
+                spec: spec.clone(),
+                status: AgentStatus::Working,
+                session: None,
+                transcript: Vec::new(),
+            },
         );
+        let summary = AgentSummary { id: agent, spec: spec.clone(), status: AgentStatus::Working };
+        (self.broadcast)(Event::AgentStarted { summary });
+        if !prompt.is_empty() {
+            self.observe(agent, AgentEvent::Prompted { text: prompt.into() });
+        }
         let config = WorkerConfig {
             provider: spec.model.provider,
             model: Some(spec.model.model.clone()).filter(|model| !model.is_empty()),
@@ -187,6 +210,7 @@ impl Runtime {
             if let Some(status) = status {
                 entry.status = status;
             }
+            remember(&mut entry.transcript, &event);
             // The commander plans; it never changes anything, whatever it asks.
             if let AgentEvent::PermissionRequested { request } = &event
                 && entry.spec.role == AgentRole::Commander
@@ -218,6 +242,17 @@ impl Runtime {
             act(session);
         }
         Ok(Reply::Done)
+    }
+}
+
+/// Adds an event to a transcript, joining a piece of text to the piece before it.
+fn remember(transcript: &mut Vec<AgentEvent>, event: &AgentEvent) {
+    match (transcript.last_mut(), event) {
+        (Some(AgentEvent::Text { text }), AgentEvent::Text { text: more })
+        | (Some(AgentEvent::Reasoning { text }), AgentEvent::Reasoning { text: more }) => {
+            text.push_str(more);
+        }
+        _ => transcript.push(event.clone()),
     }
 }
 

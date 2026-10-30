@@ -10,6 +10,7 @@
 //! [`Event`]: maestro_protocol::Event
 
 mod engine;
+pub mod resident;
 mod runtime;
 mod state;
 mod store;
