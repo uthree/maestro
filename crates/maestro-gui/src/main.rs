@@ -9,7 +9,8 @@
 //! With `--ssh` the daemon, the repository and every agent are on that machine and only the
 //! window is here, and that machine needs `maestro-daemon` installed. Without it the daemon runs
 //! on this machine from this same executable (`maestro --stdio`, `maestro serve`), so it starts
-//! by itself and always speaks this window's protocol.
+//! by itself and always speaks this window's protocol, and `--repo` defaults to the git checkout
+//! the app was started in.
 //!
 //! The window speaks English or Japanese: `--lang`, else the language picked in Settings, else
 //! `MAESTRO_LANG`, else the system's language. `--appearance` and `--direction` likewise win over
@@ -70,6 +71,12 @@ fn this_program() -> String {
         .unwrap_or_else(|_| maestro_client::DAEMON.into())
 }
 
+/// The git checkout holding the current directory, so `cargo run` in a repository opens it.
+fn checkout_here() -> Option<PathBuf> {
+    let here = std::env::current_dir().ok()?;
+    here.ancestors().find(|dir| dir.join(".git").exists()).map(PathBuf::from)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if maestro_daemon::resident::requested(&args) {
@@ -83,10 +90,11 @@ fn main() -> ExitCode {
         i18n::set(lang);
     }
     let launch = launch();
-    let project = Project::new(
-        argument("--repo").map(PathBuf::from),
-        argument("--base").unwrap_or_else(|| "main".into()),
-    );
+    // Over SSH this directory is on the user's machine, not the daemon's.
+    let repository = argument("--repo")
+        .map(PathBuf::from)
+        .or_else(|| (!matches!(launch, Launch::Ssh { .. })).then(checkout_here).flatten());
+    let project = Project::new(repository, argument("--base").unwrap_or_else(|| "main".into()));
     let direction = argument("--direction")
         .and_then(|id| Direction::from_id(&id))
         .or(saved.direction())
