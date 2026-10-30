@@ -24,10 +24,13 @@ crates/maestro-gui       the desktop app (`maestro`), built with gpui and Atelie
 ## The desktop app
 
 ```sh
-cargo run -p maestro-gui -- --repo path/to/repository             # daemon on this machine
-cargo run -p maestro-gui -- --ssh user@server --repo /srv/repo    # daemon, repository and agents on a server
+cargo run                                             # daemon on this machine, this repository
+cargo run -- --repo path/to/repository                # another repository on this machine
+cargo run -- --ssh user@server --repo /srv/repo       # daemon, repository and agents on a server
 ```
 
+`cargo run` at the workspace root builds and opens the desktop app. Without `--repo` it opens
+the git checkout you started it in (only on this machine; with `--ssh`, give `--repo`).
 On this machine the daemon is part of the `maestro` executable and starts by itself, so there is
 nothing else to build, start or stop. With `--ssh`, the server needs `maestro-daemon` installed
 (see below).
