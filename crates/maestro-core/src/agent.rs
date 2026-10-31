@@ -1,9 +1,17 @@
-//! The two kinds of agent, kept apart on purpose.
+//! The kinds of agent, kept apart on purpose.
 //!
 //! The commander talks with the user and plans; it never edits files. Workers carry out one node
 //! of a plan each and never talk to the user unless the user writes to their node. Keeping the
 //! roles separate is what lets a cheap model do mechanical work while a strong one plans, and
 //! keeps the user's conversation free of tool noise.
+//!
+//! A node too big for one worker goes to a lead instead: an agent that plans like the commander,
+//! but only that node, as a workflow of its own under the node ([`Workflow::parent`]). A lead's
+//! nodes may go to leads in turn, so the organisation is as deep as the work needs; the only
+//! bound is how many agents run at once ([`Router::max_agents`]).
+//!
+//! [`Workflow::parent`]: crate::Workflow::parent
+//! [`Router::max_agents`]: crate::Router::max_agents
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +27,17 @@ pub enum AgentRole {
     Commander,
     /// Executes one workflow node inside its own workspace.
     Worker,
+    /// Plans one workflow node as a workflow of its own. Like the commander, it has no write
+    /// access to workspaces.
+    Lead,
+}
+
+impl AgentRole {
+    /// Whether it plans rather than works: started read-only, with every permission it asks
+    /// for refused.
+    pub fn plans(self) -> bool {
+        matches!(self, Self::Commander | Self::Lead)
+    }
 }
 
 /// Everything needed to start an agent process.

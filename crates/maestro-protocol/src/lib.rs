@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -564,9 +564,10 @@ pub enum Event {
         /// Its page.
         url: String,
     },
-    /// A commander's plan became a workflow, sent as [`Event::WorkflowChanged`] as well.
+    /// A commander's or a lead's plan became a workflow, sent as [`Event::WorkflowChanged`] as
+    /// well.
     Planned {
-        /// The commander.
+        /// The commander or lead.
         agent: AgentId,
         /// The new workflow.
         workflow: WorkflowId,
@@ -724,6 +725,7 @@ mod tests {
             model: None,
             difficulty: None,
             tags: Vec::new(),
+            delegate: false,
             origin: maestro_core::NodeOrigin::User,
         });
         let b = workflow.add_node(NodeDraft {
@@ -732,6 +734,7 @@ mod tests {
             model: None,
             difficulty: None,
             tags: Vec::new(),
+            delegate: false,
             origin: maestro_core::NodeOrigin::User,
         });
         workflow.add_edge(a, b).unwrap();

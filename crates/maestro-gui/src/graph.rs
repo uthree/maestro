@@ -391,6 +391,10 @@ impl Maestro {
                     .children(
                         node.difficulty.map(|difficulty| Badge::new(i18n::difficulty(difficulty))),
                     )
+                    // A lead plans it as a workflow of its own.
+                    .when(node.delegate, |row| {
+                        row.child(Badge::new(tr("Lead", "リード")).icon(IconName::Sliders))
+                    })
                     .child(
                         div().flex_1().min_w_0().child(
                             Label::new(model_label(node))

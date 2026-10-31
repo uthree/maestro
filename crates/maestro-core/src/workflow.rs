@@ -8,6 +8,11 @@
 //! Work asked for later can wait on work already under way: a node may also wait on nodes of
 //! other workflows ([`Node::after`]), but only of earlier ones, so the graph of every workflow
 //! together stays acyclic too.
+//!
+//! A node marked [`Node::delegate`] is not worked on directly: a lead plans it as a workflow of
+//! its own, whose [`Workflow::parent`] is the node, and the node succeeds once that workflow
+//! has. The workflows of one project thus form a tree of any depth, beside the order of work
+//! each describes.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -66,6 +71,9 @@ pub struct NodeDraft {
     /// models do well at each.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Hand it to a lead, who plans it as a workflow of its own, rather than to one worker.
+    #[serde(default)]
+    pub delegate: bool,
     /// Who wrote it.
     pub origin: NodeOrigin,
 }
@@ -85,6 +93,9 @@ pub struct NodeEdit {
     /// New tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Whether a lead plans it rather than one worker doing it.
+    #[serde(default)]
+    pub delegate: Option<bool>,
 }
 
 /// One piece of work for one worker.
@@ -104,6 +115,10 @@ pub struct Node {
     /// The kind of work it is.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Whether a lead plans it as a workflow of its own rather than one worker doing it. Its
+    /// [`Node::agent`] is then the lead, and it succeeds when the lead's workflows have.
+    #[serde(default)]
+    pub delegate: bool,
     /// Who wrote it.
     pub origin: NodeOrigin,
     /// Where it is in its life.
@@ -249,6 +264,9 @@ pub struct Workflow {
     pub planned_by: Option<AgentId>,
     /// The project it belongs to, whose resources it runs with.
     pub project: Option<ProjectId>,
+    /// The delegated node it carries out, when a lead planned it: the node succeeds once this
+    /// workflow has, with this workflow's work.
+    pub parent: Option<NodeRef>,
     /// Whether it has been set going: its nodes then start by themselves as soon as what they
     /// wait for has succeeded, including nodes of other workflows.
     pub started: bool,
@@ -271,6 +289,9 @@ struct WorkflowRepr {
     // A state.json saved before projects has none.
     #[serde(default)]
     project: Option<ProjectId>,
+    // A state.json saved before leads has none.
+    #[serde(default)]
+    parent: Option<NodeRef>,
     // A state.json saved before workflows could be started has none.
     #[serde(default)]
     started: bool,
@@ -287,6 +308,7 @@ impl From<WorkflowRepr> for Workflow {
             target: repr.target,
             planned_by: repr.planned_by,
             project: repr.project,
+            parent: repr.parent,
             started: repr.started,
             nodes: repr.nodes.into_iter().map(|node| (node.id, node)).collect(),
             edges: repr.edges.into_iter().collect(),
@@ -303,6 +325,7 @@ impl From<Workflow> for WorkflowRepr {
             target: flow.target,
             planned_by: flow.planned_by,
             project: flow.project,
+            parent: flow.parent,
             started: flow.started,
             nodes: flow.nodes.into_values().collect(),
             edges: flow.edges.into_iter().collect(),
@@ -320,6 +343,7 @@ impl Workflow {
             target: None,
             planned_by: None,
             project: None,
+            parent: None,
             started: false,
             nodes: BTreeMap::new(),
             edges: BTreeSet::new(),
@@ -346,7 +370,7 @@ impl Workflow {
     pub fn add_node(&mut self, draft: NodeDraft) -> NodeId {
         let id = NodeId(self.next_node);
         self.next_node += 1;
-        let NodeDraft { title, instructions, model, difficulty, tags, origin } = draft;
+        let NodeDraft { title, instructions, model, difficulty, tags, delegate, origin } = draft;
         let status = NodeStatus::Pending;
         let node = Node {
             id,
@@ -355,6 +379,7 @@ impl Workflow {
             model,
             difficulty,
             tags,
+            delegate,
             origin,
             status,
             agent: None,
@@ -429,7 +454,7 @@ impl Workflow {
         by: NodeOrigin,
     ) -> Result<(), WorkflowError> {
         let node = self.node_mut(id)?;
-        let NodeEdit { title, instructions, model, difficulty, tags } = edit;
+        let NodeEdit { title, instructions, model, difficulty, tags, delegate } = edit;
         if let Some(title) = title {
             node.title = title;
         }
@@ -444,6 +469,9 @@ impl Workflow {
         }
         if let Some(tags) = tags {
             node.tags = tags;
+        }
+        if let Some(delegate) = delegate {
+            node.delegate = delegate;
         }
         if by == NodeOrigin::User {
             node.origin = NodeOrigin::User;
@@ -643,6 +671,7 @@ mod tests {
             model: None,
             difficulty: None,
             tags: Vec::new(),
+            delegate: false,
             origin: NodeOrigin::Commander,
         }
     }

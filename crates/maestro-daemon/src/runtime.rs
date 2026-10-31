@@ -211,8 +211,8 @@ impl Runtime {
         }
     }
 
-    /// Starts an agent, creating its worktree first. A commander is started read-only, and any
-    /// permission it asks for is refused.
+    /// Starts an agent, creating its worktree first. A commander or a lead is started
+    /// read-only, and any permission it asks for is refused.
     pub(crate) fn start(
         &self,
         spec: AgentSpec,
@@ -244,7 +244,7 @@ impl Runtime {
             cwd: spec.workspace.working_directory().clone(),
             instructions,
             program: None,
-            read_only: spec.role == AgentRole::Commander,
+            read_only: spec.role.plans(),
         };
         let message = self.briefed(agent, prompt);
         let this = self.this.clone();
@@ -325,9 +325,9 @@ impl Runtime {
                 _ => {}
             }
             remember(&mut entry.transcript, &event);
-            // The commander plans; it never changes anything, whatever it asks.
+            // Commanders and leads plan; they never change anything, whatever they ask.
             if let AgentEvent::PermissionRequested { request } = &event
-                && entry.spec.role == AgentRole::Commander
+                && entry.spec.role.plans()
                 && let Some(session) = &entry.session
             {
                 session.answer(request.id.clone(), false);

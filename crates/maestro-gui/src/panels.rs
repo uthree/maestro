@@ -14,7 +14,7 @@ use gpui::{
 use maestro_client::mirror::AgentView;
 use maestro_core::{
     AgentId, Difficulty, ModelChoice, NodeEdit, NodeId, NodeOrigin, NodeRef, NodeStatus,
-    ProviderKind,
+    ProviderKind, Workflow, WorkflowId,
 };
 
 use crate::app::{Maestro, Progress};
@@ -87,13 +87,13 @@ impl Maestro {
             if !open {
                 continue;
             }
-            for flow in flows {
+            for (flow, depth) in nested(&flows) {
                 let workflow = flow.id;
                 let progress = Progress::of(flow);
                 let attention = progress.waiting > 0 || progress.failed > 0;
                 rows.push(
                     ListItem::new(("workflow", workflow.0 as usize), flow.title.clone())
-                        .indent(1)
+                        .indent(1 + depth)
                         .icon(if attention { IconName::Alert } else { IconName::Sliders })
                         .when(attention, |item| item.icon_color(theme.colors.warning))
                         .description(match progress.total {
@@ -367,10 +367,15 @@ impl Maestro {
                 let (agent, view) = worker.clone().expect("checked above");
                 // Only the node's own worker takes revision requests.
                 let reply = node.agent == Some(agent);
-                self.worker(agent, &view, width, reply, cx).into_any_element()
+                self.worker(agent, &view, width, reply, node.delegate, cx).into_any_element()
             }
             Some(node) => self.node_details(node, window, cx).into_any_element(),
             None => self.overview(cx).into_any_element(),
+        };
+        let agent_tab = if node.as_ref().is_some_and(|node| node.delegate) {
+            tr("Lead", "リード")
+        } else {
+            tr("Worker", "ワーカー")
         };
         let tabs = worker.is_some().then(|| {
             div()
@@ -382,15 +387,11 @@ impl Maestro {
                 .border_b_1()
                 .border_color(theme.colors.border)
                 .child(
-                    Tabs::new(
-                        "node-tabs",
-                        [tr("Details", "詳細"), tr("Worker", "ワーカー")],
-                        self.node_tab,
-                    )
-                    .on_select(cx.listener(|this, index: &usize, _, cx| {
-                        this.node_tab = *index;
-                        cx.notify();
-                    })),
+                    Tabs::new("node-tabs", [tr("Details", "詳細"), agent_tab], self.node_tab)
+                        .on_select(cx.listener(|this, index: &usize, _, cx| {
+                            this.node_tab = *index;
+                            cx.notify();
+                        })),
                 )
         });
         if beside {
@@ -535,6 +536,17 @@ impl Maestro {
             NodeOrigin::Commander => tr("Planned by the commander", "コマンダーが計画"),
             NodeOrigin::User => tr("Written by you", "あなたが作成"),
         };
+        // The workflows its lead planned for it.
+        let reference = flow.map(|flow| NodeRef { workflow: flow.id, node: id });
+        let under: Vec<(WorkflowId, String, Progress)> = self
+            .mirror
+            .workflows
+            .values()
+            .filter(|child| reference.is_some() && child.parent == reference)
+            .map(|child| (child.id, child.title.clone(), Progress::of(child)))
+            .collect();
+        let delegate = node.delegate;
+        let unstarted = node.status == NodeStatus::Pending;
 
         div()
             .id("node-details")
@@ -623,6 +635,39 @@ impl Maestro {
                         )
                     }),
             )
+            .child(
+                group()
+                    .child(
+                        Switch::new("delegate", delegate)
+                            .label(tr("Hand it to a lead", "リードに任せる"))
+                            .disabled(!unstarted)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let edit = NodeEdit { delegate: Some(!delegate), ..NodeEdit::default() };
+                                this.edit_node(id, edit, cx);
+                            })),
+                    )
+                    .child(
+                        Label::new(tr(
+                            "A lead plans the step as a workflow of its own, whose steps can go to leads in turn",
+                            "リードがこのステップを独自のワークフローとして計画します。その中のステップも、さらにリードに任せられます",
+                        ))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Faint),
+                    )
+                    .children(under.into_iter().map(|(workflow, title, progress)| {
+                        let (done, total) = (progress.done, progress.total);
+                        ListItem::new(("under", workflow.0 as usize), title)
+                            .icon(IconName::Sliders)
+                            .description(trf!(
+                                "{done} of {total} steps done",
+                                "{total} ステップ中 {done} 完了"
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_workflow(workflow);
+                                cx.notify();
+                            }))
+                    })),
+            )
             .when(!node.contenders.is_empty(), |details| details.child(self.contenders(node, cx)))
             .child(
                 group()
@@ -662,7 +707,7 @@ impl Maestro {
                             )
                     })),
             )
-            .when(node.status == NodeStatus::Succeeded, |details| {
+            .when(node.status == NodeStatus::Succeeded && !delegate, |details| {
                 details.child(
                     group()
                         .child(label(tr("How did it go?", "結果はどうでしたか？")))
@@ -700,10 +745,12 @@ impl Maestro {
         view: &AgentView,
         width: Pixels,
         reply: bool,
+        lead: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let rows = self.entries(agent, view, cx);
+        let role = if lead { tr("lead", "リード") } else { tr("worker", "ワーカー") };
         let busy = view.transcript.busy;
         let provider = view.spec.model.provider;
         div()
@@ -736,7 +783,7 @@ impl Maestro {
                                             .ok();
                                     })
                                 })
-                                .model(trf!("{} · worker", "{} · ワーカー", provider.label()))
+                                .model(format!("{} · {role}", provider.label()))
                                 .when_some(provider_logo(provider), Composer::model_logo)
                                 .busy(busy)
                                 // The daemon holds a message sent mid-turn until the turn ends.
@@ -1007,4 +1054,26 @@ impl Maestro {
             )
             .into_any_element()
     }
+}
+
+/// Workflows in the order the sidebar lists them, each with how far under another it is: a
+/// workflow a lead planned comes right after the workflow of the step it carries out, so the
+/// organisation reads as a tree. `flows` keeps its order among siblings.
+fn nested<'a>(flows: &[&'a Workflow]) -> Vec<(&'a Workflow, usize)> {
+    let listed = |id: WorkflowId| flows.iter().any(|flow| flow.id == id);
+    let mut order = Vec::with_capacity(flows.len());
+    let mut stack: Vec<(&Workflow, usize)> = flows
+        .iter()
+        .rev()
+        .filter(|flow| !flow.parent.is_some_and(|parent| listed(parent.workflow)))
+        .map(|&flow| (flow, 0))
+        .collect();
+    while let Some((flow, depth)) = stack.pop() {
+        order.push((flow, depth));
+        let under = flows.iter().rev().filter(|child| {
+            child.parent.is_some_and(|parent| parent.workflow == flow.id) && child.id != flow.id
+        });
+        stack.extend(under.map(|&child| (child, depth + 1)));
+    }
+    order
 }

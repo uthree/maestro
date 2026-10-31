@@ -25,7 +25,8 @@ use gpui::{
 };
 use maestro_client::{Client, ClientError};
 use maestro_core::{
-    Comparison, Difficulty, Host, ProviderKind, ProviderStatus, Router, SetupAction,
+    Comparison, DEFAULT_MAX_AGENTS, Difficulty, Host, ProviderKind, ProviderStatus, Router,
+    SetupAction,
 };
 use maestro_protocol::{Command, Reply};
 
@@ -95,8 +96,8 @@ impl Page {
                 "作業を任せるCLIの導入・更新・利用の切り替え",
             ),
             Self::Routing => tr(
-                "When a step runs on several models to compare them",
-                "同じステップを複数のモデルで比較する条件",
+                "How many agents run at once, and when a step runs on several models",
+                "同時に動くエージェントの数と、同じステップを複数のモデルで比較する条件",
             ),
         }
     }
@@ -117,6 +118,8 @@ pub struct Settings {
     page: Page,
     /// The comparison settings being edited, until saved or reverted.
     draft: Option<Comparison>,
+    /// The limit on agents at once being edited, until saved or reverted.
+    agents_draft: Option<usize>,
     /// Whether the daemon is looking for the CLIs.
     scanning: bool,
     /// What the last action did.
@@ -133,6 +136,7 @@ impl Settings {
             main,
             page: Page::General,
             draft: None,
+            agents_draft: None,
             scanning: false,
             status: None,
             preferences: Preferences::load(),
@@ -225,6 +229,7 @@ impl Settings {
         self.request(Command::SetRouter { router }, cx, move |this, result, _| match result {
             Ok(_) => {
                 this.draft = None;
+                this.agents_draft = None;
                 this.report(saved, Tone::Success);
             }
             Err(error) => this.report(error.to_string(), Tone::Danger),
@@ -655,6 +660,44 @@ impl Settings {
             .position(|difficulty| *difficulty == comparison.min_difficulty)
             .unwrap_or(0);
         let (worker_values, worker_index) = choices(&[1, 2, 3, 4, 6, 8], comparison.max_workers);
+        let max_agents = self.agents_draft.unwrap_or(router.max_agents);
+        let (agent_values, agent_index) = choices(&AGENT_LIMITS, max_agents);
+        let agents = FormGroup::new(tr("Agents at once", "同時に動くエージェント"))
+            .description(tr(
+                "A step too big for one worker goes to a lead, who plans it as a workflow of its \
+                 own, and that workflow's steps can go to leads in turn, as deep as the work \
+                 needs. This bounds how many workers and leads work at the same time; steps past \
+                 it wait for their turn. The commanders you talk with are not counted.",
+                "1体のワーカーには大きすぎるステップはリードに任され、リードはそれを独自のワーク\
+                 フローとして計画します。その中のステップもさらにリードに任せられ、階層の深さに\
+                 制限はありません。ここでは、同時に作業するワーカーとリードの数を制限します。上限を\
+                 超えたステップは順番を待ちます。会話するコマンダーは数えません。",
+            ))
+            .child(
+                FormField::new(tr("Workers and leads", "ワーカーとリードの数")).child(
+                    SegmentedControl::new(
+                        "max-agents",
+                        agent_values.iter().map(|&count| {
+                            Segment::label(if count == 0 {
+                                tr("No limit", "上限なし").to_string()
+                            } else {
+                                count.to_string()
+                            })
+                        }),
+                        agent_index,
+                    )
+                    .size(ControlSize::Small)
+                    .on_select(cx.listener(
+                        move |this, index: &usize, _, cx| {
+                            let current = this.agents_draft.unwrap_or(this.router(cx).max_agents);
+                            let (values, _) = choices(&AGENT_LIMITS, current);
+                            this.agents_draft = Some(values[*index]);
+                            this.status = None;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            );
 
         let mut limits = FormGroup::new(tr("Limits", "同時実行の上限")).description(tr(
             "Comparing costs compute and usage. Past these limits steps run on one model; work \
@@ -736,6 +779,7 @@ impl Settings {
         });
 
         vec![
+            agents.into_any_element(),
             FormGroup::new(tr("Comparison", "比較"))
                 .description(tr(
                     "When there is room, a step runs on several models at once and you keep the \
@@ -799,10 +843,9 @@ impl Settings {
     /// Reset, Revert and Save, for the comparison page.
     fn routing_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let changed = self
-            .draft
-            .as_ref()
-            .is_some_and(|draft| *draft != self.main.read(cx).mirror.router.comparison);
+        let router = &self.main.read(cx).mirror.router;
+        let changed = self.draft.as_ref().is_some_and(|draft| *draft != router.comparison)
+            || self.agents_draft.is_some_and(|limit| limit != router.max_agents);
         div()
             .flex()
             .items_center()
@@ -813,6 +856,7 @@ impl Settings {
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.draft = Some(Comparison::default());
+                        this.agents_draft = Some(DEFAULT_MAX_AGENTS);
                         cx.notify();
                     })),
             )
@@ -820,14 +864,22 @@ impl Settings {
             .child(Button::new("revert", tr("Revert", "元に戻す")).disabled(!changed).on_click(
                 cx.listener(|this, _, _, cx| {
                     this.draft = None;
+                    this.agents_draft = None;
                     cx.notify();
                 }),
             ))
             .child(Button::new("save", tr("Save", "保存")).primary().disabled(!changed).on_click(
                 cx.listener(|this, _, _, cx| {
-                    let Some(draft) = this.draft.clone() else { return };
+                    if this.draft.is_none() && this.agents_draft.is_none() {
+                        return;
+                    }
                     let mut router = this.router(cx);
-                    router.comparison = draft;
+                    if let Some(draft) = this.draft.clone() {
+                        router.comparison = draft;
+                    }
+                    if let Some(limit) = this.agents_draft {
+                        router.max_agents = limit;
+                    }
                     this.save_router(
                         router,
                         tr("Saved to the daemon", "デーモンに保存しました"),
@@ -837,6 +889,9 @@ impl Settings {
             ))
     }
 }
+
+/// The limits on agents at once the settings offer; 0 is no limit.
+const AGENT_LIMITS: [usize; 6] = [0, 2, 4, 8, 12, 16];
 
 /// The values a picker offers, with `current` among them even when it is not one of `common`,
 /// and the index of `current`.
@@ -893,7 +948,7 @@ impl Render for Settings {
                     .children(actions),
             );
 
-        let changed = self.draft.is_some();
+        let changed = self.draft.is_some() || self.agents_draft.is_some();
         let status = match &self.status {
             Some((message, tone)) => StatusBar::new().message(message.clone()).tone(*tone),
             None if self.scanning => StatusBar::new()

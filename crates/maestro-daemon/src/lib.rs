@@ -97,6 +97,8 @@ impl Hub {
         hub.inner.lock().expect("hub lock").state =
             State::restore(snapshot.projects, snapshot.workflows, &commanders);
         hub.runtime.restore(snapshot.agents);
+        // Work that was waiting for room when the daemon stopped starts again.
+        hub.engine.send(Job::Resume).ok();
         let saving = hub.clone();
         thread::spawn(move || {
             loop {
