@@ -81,6 +81,20 @@ impl ProviderKind {
             Self::OpenCode => "opencode auth login",
         }
     }
+
+    /// Models a person can pick for this CLI without listing them in the router's catalog:
+    /// names the CLI itself documents as stable, with their grade. Only Claude Code publishes
+    /// aliases that follow its newest models; for the others, the catalog is the list.
+    pub fn known_models(self) -> &'static [(&'static str, ModelGrade)] {
+        match self {
+            Self::ClaudeCode => &[
+                ("opus", ModelGrade::Frontier),
+                ("sonnet", ModelGrade::Standard),
+                ("haiku", ModelGrade::Light),
+            ],
+            Self::Codex | Self::Antigravity | Self::OpenCode => &[],
+        }
+    }
 }
 
 /// What to do to a provider's CLI on a host.

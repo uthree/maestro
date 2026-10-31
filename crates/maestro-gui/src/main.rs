@@ -21,6 +21,7 @@
 
 mod app;
 mod chat;
+mod dropdown;
 mod graph;
 mod i18n;
 mod input;
