@@ -123,6 +123,31 @@ impl Catalog {
             .collect();
         Self { models }
     }
+
+    /// The models a person may pick for `provider`, each with its grade: the CLI's own default
+    /// first, then the catalog's models, then the names the CLI documents that the catalog
+    /// does not list.
+    pub fn offered(&self, provider: ProviderKind) -> Vec<(String, ModelGrade)> {
+        let default = self
+            .models
+            .iter()
+            .find(|profile| profile.provider == provider && profile.model.is_empty())
+            .map_or(ModelGrade::Standard, |profile| profile.grade);
+        let mut offered = vec![(String::new(), default)];
+        let listed = self
+            .models
+            .iter()
+            .filter(|profile| profile.provider == provider && !profile.model.is_empty())
+            .map(|profile| (profile.model.clone(), profile.grade));
+        let known =
+            provider.known_models().iter().map(|&(model, grade)| (model.to_string(), grade));
+        for (model, grade) in listed.chain(known) {
+            if !offered.iter().any(|(name, _)| *name == model) {
+                offered.push((model, grade));
+            }
+        }
+        offered
+    }
 }
 
 /// Names a model across catalog edits.
@@ -575,5 +600,23 @@ mod tests {
             router().choose(Difficulty::Hard, &tags, &record, ALL).unwrap().model.model
         };
         assert_eq!((pick("ui").as_str(), pick("tests").as_str()), ("big-a", "big-b"));
+    }
+
+    #[test]
+    fn offered_models_put_the_default_first_and_list_each_name_once() {
+        let catalog = Catalog {
+            models: vec![
+                profile(ProviderKind::ClaudeCode, "", ModelGrade::Standard, 0.5),
+                profile(ProviderKind::ClaudeCode, "claude-x", ModelGrade::Frontier, 0.5),
+                profile(ProviderKind::ClaudeCode, "opus", ModelGrade::Frontier, 0.5),
+                profile(ProviderKind::Codex, "codex-x", ModelGrade::Standard, 0.5),
+            ],
+        };
+        let names = |provider| {
+            catalog.offered(provider).into_iter().map(|(model, _)| model).collect::<Vec<_>>()
+        };
+        assert_eq!(names(ProviderKind::ClaudeCode), ["", "claude-x", "opus", "sonnet", "haiku"]);
+        assert_eq!(names(ProviderKind::Codex), ["", "codex-x"]);
+        assert_eq!(names(ProviderKind::OpenCode), [""]);
     }
 }

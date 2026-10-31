@@ -27,6 +27,7 @@ use maestro_core::{
 };
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
+use crate::dropdown::Menu;
 use crate::graph::Canvas;
 use crate::i18n::{self, Lang, tr};
 use crate::{input, link, settings, trf};
@@ -191,8 +192,10 @@ pub struct Maestro {
     pub(crate) node_tab: usize,
     /// The contender the worker tab shows, when the node ran on several models.
     pub(crate) contender: Option<AgentId>,
-    /// The CLI a new commander runs on.
-    pub(crate) provider: ProviderKind,
+    /// The model a new commander runs on.
+    pub(crate) commander: ModelChoice,
+    /// The menu that is open, if any.
+    pub(crate) menu: Option<Menu>,
     pub(crate) canvas: Canvas,
     /// Reasoning blocks and tool calls the user has opened.
     pub(crate) expanded: HashSet<SharedString>,
@@ -244,7 +247,13 @@ impl Maestro {
             window_width: px(0.),
             node_tab: 0,
             contender: None,
-            provider: ProviderKind::ClaudeCode,
+            commander: ModelChoice {
+                provider: ProviderKind::ClaudeCode,
+                model: String::new(),
+                grade: ModelGrade::Standard,
+                effort: Effort::Medium,
+            },
+            menu: None,
             canvas: Canvas::default(),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
@@ -417,10 +426,35 @@ impl Maestro {
         }
     }
 
-    /// The provider a new commander runs on: the one picked, if the project allows it.
-    pub(crate) fn commander_provider(&self) -> ProviderKind {
+    /// Closes whichever menu is open, for a click outside it.
+    pub(crate) fn close_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |_, cx| {
+            this.update(cx, |this, cx| {
+                this.menu = None;
+                cx.notify();
+            })
+            .ok();
+        }
+    }
+
+    /// The model a new commander runs on: the one picked, if the project allows its provider,
+    /// else the default of the first provider it allows.
+    pub(crate) fn commander_model(&self) -> ModelChoice {
         let allowed = self.allowed_providers();
-        if allowed.contains(&self.provider) { self.provider } else { allowed[0] }
+        if allowed.contains(&self.commander.provider) {
+            self.commander.clone()
+        } else {
+            ModelChoice {
+                provider: allowed[0],
+                model: String::new(),
+                grade: ModelGrade::Standard,
+                effort: Effort::Medium,
+            }
+        }
     }
 
     /// Sends a command from a background task and hands its reply to `then`. A refusal is shown
@@ -577,16 +611,8 @@ impl Maestro {
                 .refuse(tr("Create a project first.", "先にプロジェクトを作成してください。"), cx);
         };
         input::clear(&self.fields.composer, window, cx);
-        let command = Command::StartCommander {
-            project,
-            model: ModelChoice {
-                provider: self.commander_provider(),
-                model: String::new(),
-                grade: ModelGrade::Standard,
-                effort: Effort::Medium,
-            },
-            prompt: text,
-        };
+        let command =
+            Command::StartCommander { project, model: self.commander_model(), prompt: text };
         self.request(command, cx, |this, reply, _| {
             if let Reply::AgentStarted { agent } = reply {
                 this.conversation = Some(agent);
@@ -1088,14 +1114,14 @@ impl Render for Maestro {
 
         let body = match &self.connection {
             Connection::Ready(_) => {
-                let chat = (!full).then(|| self.chat(cx).into_any_element());
+                let chat = (!full).then(|| self.chat(window, cx).into_any_element());
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .when(sidebar, |row| row.child(self.sidebar(cx)))
                     .children(chat)
-                    .when(pane, |row| row.child(self.workflow_pane(pane_width, full, cx)))
+                    .when(pane, |row| row.child(self.workflow_pane(pane_width, full, window, cx)))
                     .when(resources, |row| row.child(self.project_pane(pane_width, cx)))
                     .into_any_element()
             }
