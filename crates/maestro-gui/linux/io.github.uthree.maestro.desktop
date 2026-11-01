@@ -1,0 +1,14 @@
+# Install as ~/.local/share/applications/io.github.uthree.maestro.desktop (or under
+# /usr/share), with assets/app-icon/png/<size>.png as
+# hicolor/<size>x<size>/apps/io.github.uthree.maestro.png and assets/app-icon/icon.svg as
+# hicolor/scalable/apps/io.github.uthree.maestro.svg. The file name matches the window's app id,
+# which is how the desktop finds this icon for a running window.
+[Desktop Entry]
+Type=Application
+Name=Maestro
+Comment=Plan, run and steer coding agents across providers
+Exec=maestro
+Icon=io.github.uthree.maestro
+Terminal=false
+Categories=Development;
+StartupWMClass=io.github.uthree.maestro

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  What makes the built executable an application rather than a command.
+
+  Without a bundle around it, macOS treats `maestro` as a tool: it gets no icon in the Dock and no
+  name in the menu bar. Build `Maestro.app` as
+
+    Maestro.app/Contents/Info.plist              this file
+    Maestro.app/Contents/MacOS/maestro           target/release/maestro
+    Maestro.app/Contents/Resources/maestro.icns  assets/app-icon/icon.icns
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Maestro</string>
+    <key>CFBundleDisplayName</key>
+    <string>Maestro</string>
+    <!-- github.com/uthree/maestro, in the form Apple asks for; also the Linux app id. -->
+    <key>CFBundleIdentifier</key>
+    <string>io.github.uthree.maestro</string>
+    <key>CFBundleExecutable</key>
+    <string>maestro</string>
+    <key>CFBundleIconFile</key>
+    <string>maestro.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <!-- A release build rewrites both from its tag; these are what a local bundle gets. -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
