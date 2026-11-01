@@ -1,0 +1,2 @@
+// gpui loads the application icon from resource ID 1 for its window class.
+1 ICON "assets/app-icon/icon.ico"

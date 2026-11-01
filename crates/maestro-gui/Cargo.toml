@@ -36,5 +36,9 @@ serde_json.workspace = true
 # The system language, which picks between the English and Japanese strings.
 sys-locale = "0.3.2"
 
+[build-dependencies]
+# Embeds the application icon in the Windows executable (see build.rs).
+embed-resource = "3.0"
+
 [lints]
 workspace = true

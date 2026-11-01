@@ -46,6 +46,9 @@ use crate::app::{Maestro, Start};
 /// The smallest window the layout fits without cutting off controls.
 const MIN_SIZE: (f32, f32) = (900., 600.);
 
+/// The app's reverse-DNS id: the Linux window's app id and the macOS bundle identifier.
+const APP_ID: &str = "io.github.uthree.maestro";
+
 /// The value after `name` on the command line.
 fn argument(name: &str) -> Option<String> {
     let mut args = std::env::args();
@@ -150,6 +153,9 @@ pub(crate) fn window_options(
             window_min_size: Some(gpui::size(px(min.0), px(min.1))),
             window_background: theme.window_background(),
             titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
+            // On Linux the desktop finds the window's icon through this id, which names the
+            // installed `linux/io.github.uthree.maestro.desktop` and its hicolor icons.
+            app_id: Some(APP_ID.into()),
             ..Default::default()
         },
         &theme,
