@@ -14,7 +14,7 @@ use atelier::{
 };
 use futures::StreamExt;
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, IntoElement, ParentElement, Pixels, Render,
+    AnyWindowHandle, App, Context, Entity, FocusHandle, IntoElement, ParentElement, Pixels, Render,
     ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::input::InputState;
@@ -27,6 +27,7 @@ use maestro_core::{
 };
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
+use crate::dialog::Dialog;
 use crate::dropdown::Menu;
 use crate::graph::Canvas;
 use crate::i18n::{self, Lang, tr};
@@ -127,6 +128,8 @@ pub struct Fields {
     pub resource: Entity<InputState>,
     /// The base branch of a repository or folder to add.
     pub resource_base: Entity<InputState>,
+    /// A project's new name, in the dialog that renames it.
+    pub rename: Entity<InputState>,
 }
 
 impl Fields {
@@ -196,6 +199,10 @@ pub struct Maestro {
     pub(crate) commander: ModelChoice,
     /// The menu that is open, if any.
     pub(crate) menu: Option<Menu>,
+    /// The dialog that is open over the window, if any.
+    pub(crate) dialog: Option<Dialog>,
+    /// Focus for the open dialog, so Escape reaches it.
+    pub(crate) dialog_focus: FocusHandle,
     pub(crate) canvas: Canvas,
     /// Reasoning blocks and tool calls the user has opened.
     pub(crate) expanded: HashSet<SharedString>,
@@ -224,6 +231,7 @@ impl Maestro {
             project_name: input::line(tr("Project name", "プロジェクト名"), "", window, cx),
             resource: input::line("owner/name", "", window, cx),
             resource_base: input::line("main", "", window, cx),
+            rename: input::line(tr("Project name", "プロジェクト名"), "", window, cx),
         };
         let mut view = Self {
             launch,
@@ -254,6 +262,8 @@ impl Maestro {
                 effort: Effort::Medium,
             },
             menu: None,
+            dialog: None,
+            dialog_focus: cx.focus_handle(),
             canvas: Canvas::default(),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
@@ -336,11 +346,20 @@ impl Maestro {
                 self.enter_project(project.id);
             }
             Event::ProjectRemoved { project } if Some(project) == self.project => {
+                if self.dialog.is_some_and(|dialog| dialog.project() == project) {
+                    self.dialog = None;
+                }
                 let next = self.mirror.projects.keys().next_back().copied();
                 match next {
                     Some(next) => self.enter_project(next),
                     None => self.leave_project(),
                 }
+            }
+            // Another frontend deleted the project a dialog is about.
+            Event::ProjectRemoved { project }
+                if self.dialog.is_some_and(|dialog| dialog.project() == project) =>
+            {
+                self.dialog = None;
             }
             Event::WorkflowRemoved { workflow } if Some(workflow) == self.workflow => {
                 self.workflow = None;
@@ -641,10 +660,86 @@ impl Maestro {
         self.command(Command::RenameProject { project, name }, cx);
     }
 
-    /// Deletes the open project and its workflows.
-    pub(crate) fn delete_project(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project else { return };
-        self.command(Command::DeleteProject { project }, cx);
+    /// Asks for a new name for `project`, in a dialog.
+    pub(crate) fn ask_rename(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.mirror.projects.get(&project).map(|found| found.name.clone()) else {
+            return;
+        };
+        self.menu = None;
+        self.error = None;
+        self.dialog = Some(Dialog::Rename(project));
+        self.fields.rename.update(cx, |state, cx| {
+            state.set_value(name, window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Renames the project in the rename dialog to what its field holds, closing the dialog once
+    /// the daemon has done it.
+    pub(crate) fn confirm_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::Rename(project)) = self.dialog else { return };
+        let name = input::text(&self.fields.rename, cx).trim().to_owned();
+        if name.is_empty() {
+            return self
+                .refuse(tr("Give the project a name.", "プロジェクト名を入力してください。"), cx);
+        }
+        self.error = None;
+        self.request(Command::RenameProject { project, name }, cx, move |this, _, _| {
+            if this.dialog == Some(Dialog::Rename(project)) {
+                this.dialog = None;
+            }
+        });
+    }
+
+    /// Asks whether to delete `project` and its workflows, in a dialog.
+    pub(crate) fn ask_delete(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.mirror.projects.contains_key(&project) {
+            return;
+        }
+        self.menu = None;
+        self.error = None;
+        self.dialog = Some(Dialog::Delete(project));
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    /// Deletes the project in the delete dialog and its workflows. The dialog stays open with
+    /// the daemon's reason if it refuses, as it does while the project's work is under way.
+    pub(crate) fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::Delete(project)) = self.dialog else { return };
+        self.error = None;
+        self.request(Command::DeleteProject { project }, cx, move |this, _, _| {
+            if this.dialog == Some(Dialog::Delete(project)) {
+                this.dialog = None;
+            }
+        });
+    }
+
+    /// Closes the open dialog without doing what it asks.
+    pub(crate) fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        self.dialog = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Stops `project`'s commander, if it is working.
+    pub(crate) fn stop_project_commander(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let Some(agent) = self.mirror.projects.get(&project).and_then(|found| found.commander)
+        else {
+            return;
+        };
+        self.command(Command::InterruptAgent { agent }, cx);
     }
 
     /// Adds the resource the pane's fields describe to the open project.
@@ -1121,7 +1216,7 @@ impl Render for Maestro {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(sidebar, |row| row.child(self.sidebar(cx)))
+                    .when(sidebar, |row| row.child(self.sidebar(window, cx)))
                     .children(chat)
                     .when(pane, |row| row.child(self.workflow_pane(pane_width, full, window, cx)))
                     .when(resources, |row| row.child(self.project_pane(pane_width, cx)))
@@ -1140,5 +1235,6 @@ impl Render for Maestro {
             .child(self.title_bar(cx))
             .child(body)
             .child(self.footer(cx))
+            .children(self.dialog(window, cx))
     }
 }
