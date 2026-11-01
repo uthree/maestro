@@ -1,15 +1,22 @@
 //! The open project's resources, in the pane beside the conversation: its name, the
 //! repositories, folders and machines its commander may choose from, and the AI providers its
-//! work may run on.
+//! work may run on. Also what a right-click on a project in the sidebar offers, and the dialogs
+//! that rename and delete one.
 
 use atelier::{
     ActiveTheme, Button, ButtonVariant, ControlSize, FormField, FormGroup, IconName, Label,
-    ListItem, SectionHeader, Segment, SegmentedControl, Switch, TextColor, TextField, TextSize,
+    ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Switch, TextColor,
+    TextField, TextSize, menu_separator,
 };
-use gpui::{Context, IntoElement, ParentElement, Pixels, Styled, div, prelude::*};
-use maestro_core::{Host, ProviderKind, Resource};
+use gpui::{
+    AnyElement, Context, IntoElement, ParentElement, Pixels, Point, Styled, Window, div,
+    prelude::*, px,
+};
+use maestro_core::{Host, ProjectId, ProviderKind, Resource};
 
 use crate::app::Maestro;
+use crate::dialog::{self, Dialog, Parts};
+use crate::dropdown;
 use crate::i18n::tr;
 use crate::{input, trf};
 
@@ -52,7 +59,8 @@ impl Maestro {
     pub(crate) fn project_pane(&self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(project) = self.open_project() else { return div().into_any_element() };
-        let workflows = self.mirror.workflows_of(project.id).count();
+        let id = project.id;
+        let workflows = self.mirror.workflows_of(id).count();
 
         let header = div()
             .flex()
@@ -317,12 +325,14 @@ impl Maestro {
                         div().flex().child(
                             Button::new(
                                 "delete-project",
-                                tr("Delete project", "プロジェクトを削除"),
+                                tr("Delete project…", "プロジェクトを削除…"),
                             )
                             .variant(ButtonVariant::Danger)
                             .icon(IconName::Trash)
                             .size(ControlSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.delete_project(cx))),
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.ask_delete(id, window, cx),
+                            )),
                         ),
                     ),
             );
@@ -340,6 +350,154 @@ impl Maestro {
             .child(header)
             .child(body)
             .into_any_element()
+    }
+}
+
+impl Maestro {
+    /// The menu a right-click on `project` in the sidebar opens at `position`: open it, start a
+    /// workflow in it, show its resources, stop its commander, rename it, delete it.
+    pub(crate) fn project_menu(
+        &self,
+        project: ProjectId,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let found = self.mirror.projects.get(&project)?;
+        let working = found
+            .commander
+            .and_then(|agent| self.mirror.agents.get(&agent))
+            .is_some_and(|view| view.transcript.busy);
+        let mut menu = Popover::new()
+            .id("project-menu")
+            .w(px(240.))
+            .child(MenuItem::new("project-menu-open", tr("Open", "開く")).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.menu = None;
+                    this.enter_project(project);
+                    this.workflow_open = false;
+                    this.workflow_full = false;
+                    cx.notify();
+                },
+            )))
+            .child(
+                MenuItem::new("project-menu-workflow", tr("New workflow", "新しいワークフロー"))
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.enter_project(project);
+                        this.new_workflow(cx);
+                    })),
+            )
+            .child(
+                MenuItem::new("project-menu-resources", tr("Resources", "リソース"))
+                    .icon(IconName::Folder)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.enter_project(project);
+                        if !this.resources_open {
+                            this.toggle_resources(cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        if working {
+            menu = menu.child(
+                MenuItem::new("project-menu-stop", tr("Stop the commander", "コマンダーを止める"))
+                    .icon(IconName::Stop)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.stop_project_commander(project, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        let menu =
+            menu.child(menu_separator(cx))
+                .child(MenuItem::new("project-menu-rename", tr("Rename…", "名前を変更…")).on_click(
+                    cx.listener(move |this, _, window, cx| this.ask_rename(project, window, cx)),
+                ))
+                .child(
+                    MenuItem::new("project-menu-delete", tr("Delete…", "削除…"))
+                        .icon(IconName::Trash)
+                        .danger()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.ask_delete(project, window, cx)
+                        })),
+                );
+        Some(dropdown::at_pointer(
+            "project-menu-backdrop",
+            menu,
+            position,
+            self.close_menu(cx),
+            window,
+        ))
+    }
+
+    /// The dialog that is open over the window, if any.
+    pub(crate) fn dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let open = self.dialog?;
+        let project = self.mirror.projects.get(&open.project())?;
+        let name = project.name.clone();
+        let this = cx.entity().downgrade();
+        let cancel = move |_: &mut Window, cx: &mut gpui::App| {
+            this.update(cx, |this, cx| this.close_dialog(cx)).ok();
+        };
+        let cancel_button = Button::new("dialog-cancel", tr("Cancel", "キャンセル"))
+            .on_click(cx.listener(|this, _, _, cx| this.close_dialog(cx)))
+            .into_any_element();
+        let parts = match open {
+            Dialog::Rename(_) => {
+                let commit = cx.entity().downgrade();
+                Parts {
+                    title: tr("Rename project", "プロジェクトの名前を変更").into(),
+                    message: None,
+                    body: Some(
+                        TextField::new()
+                            .child(input::message(&self.fields.rename, move |_, cx| {
+                                commit.update(cx, |this, cx| this.confirm_rename(cx)).ok();
+                            }))
+                            .into_any_element(),
+                    ),
+                    error: self.error.clone(),
+                    actions: vec![
+                        cancel_button,
+                        Button::new("dialog-rename", tr("Rename", "名前を変更"))
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_rename(cx)))
+                            .into_any_element(),
+                    ],
+                }
+            }
+            Dialog::Delete(id) => {
+                let workflows = self.mirror.workflows_of(id).count();
+                Parts {
+                    title: trf!("Delete “{name}”?", "「{name}」を削除しますか？"),
+                    message: Some(match workflows {
+                        0 => tr(
+                            "This can't be undone. Its folders and repositories are left as                              they are.",
+                            "元に戻せません。フォルダとリポジトリはそのまま残ります。",
+                        )
+                        .into(),
+                        _ => trf!(
+                            "Its {workflows} workflows are deleted too, and this can't be                              undone. Their branches and worktrees stay.",
+                            "ワークフロー {workflows} 件も削除され、元に戻せません。ブランチと                             ワークツリーは残ります。"
+                        ),
+                    }),
+                    body: None,
+                    error: self.error.clone(),
+                    actions: vec![
+                        cancel_button,
+                        Button::new("dialog-delete", tr("Delete", "削除"))
+                            .variant(ButtonVariant::Danger)
+                            .icon(IconName::Trash)
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_delete(cx)))
+                            .into_any_element(),
+                    ],
+                }
+            }
+        };
+        Some(dialog::modal(parts, &self.dialog_focus, cancel, window, cx))
     }
 }
 

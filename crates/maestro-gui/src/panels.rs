@@ -8,8 +8,8 @@ use atelier::{
     Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
 };
 use gpui::{
-    ClickEvent, Context, Corner, IntoElement, ParentElement, Pixels, Styled, Window, div,
-    prelude::*, px,
+    ClickEvent, Context, Corner, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Styled, Window, div, prelude::*, px,
 };
 use maestro_client::mirror::AgentView;
 use maestro_core::{
@@ -42,7 +42,11 @@ impl Maestro {
     }
 
     /// The projects, with the open project's workflows under it.
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn sidebar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let mut rows = Vec::new();
         for project in self.mirror.projects.values().rev() {
@@ -54,34 +58,42 @@ impl Maestro {
                 .commander
                 .and_then(|agent| self.mirror.agents.get(&agent))
                 .is_some_and(|view| view.transcript.busy);
+            let item = ListItem::new(("project", id.0 as usize), project.name.clone())
+                .icon(if waiting { IconName::Alert } else { IconName::Folder })
+                .when(waiting, |item| item.icon_color(theme.colors.warning))
+                .description(if working {
+                    tr("The commander is working", "コマンダーが作業中").to_string()
+                } else {
+                    project_summary(
+                        project
+                            .resources
+                            .iter()
+                            .filter(|entry| {
+                                !matches!(entry.resource, maestro_core::Resource::Provider { .. })
+                            })
+                            .count(),
+                        flows.len(),
+                    )
+                })
+                .selected(open && !self.workflow_open)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enter_project(id);
+                    this.workflow_open = false;
+                    this.workflow_full = false;
+                    cx.notify();
+                }));
+            // A right-click opens what can be done to the project where the pointer is.
             rows.push(
-                ListItem::new(("project", id.0 as usize), project.name.clone())
-                    .icon(if waiting { IconName::Alert } else { IconName::Folder })
-                    .when(waiting, |item| item.icon_color(theme.colors.warning))
-                    .description(if working {
-                        tr("The commander is working", "コマンダーが作業中").to_string()
-                    } else {
-                        project_summary(
-                            project
-                                .resources
-                                .iter()
-                                .filter(|entry| {
-                                    !matches!(
-                                        entry.resource,
-                                        maestro_core::Resource::Provider { .. }
-                                    )
-                                })
-                                .count(),
-                            flows.len(),
-                        )
-                    })
-                    .selected(open && !self.workflow_open)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.enter_project(id);
-                        this.workflow_open = false;
-                        this.workflow_full = false;
-                        cx.notify();
-                    }))
+                div()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.menu = Some(Menu::Project(id, event.position));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(item)
                     .into_any_element(),
             );
             if !open {
@@ -114,6 +126,12 @@ impl Maestro {
             }
         }
         let none = rows.is_empty();
+        let project_menu = match self.menu {
+            Some(Menu::Project(project, position)) => {
+                self.project_menu(project, position, window, cx)
+            }
+            _ => None,
+        };
         let has_project = self.project.is_some();
         Sidebar::new(Edge::Left)
             .w(px(crate::app::SIDEBAR_WIDTH))
@@ -158,6 +176,7 @@ impl Maestro {
                             }),
                     )
                     .children(rows)
+                    .children(project_menu)
                     .when(none, |list| {
                         list.child(
                             div().px(theme.spacing.sm).child(
