@@ -19,6 +19,7 @@ crates/maestro-daemon    owns all state; `serve` is the resident daemon, `--stdi
 crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`, and
                          keeps the frontend's copy of the daemon's state
 crates/maestro-gui       the desktop app (`maestro`), built with gpui and Atelier
+crates/maestro-mock      scripted stand-ins for the four CLIs, and an OpenAI-compatible server, for tests
 ```
 
 ## The desktop app
@@ -92,6 +93,23 @@ To check an adapter against a CLI installed on a machine:
 ```sh
 cargo run -p maestro-agents --example try_worker -- claude "Say hello in one word"
 ```
+
+## Testing without an account
+
+`maestro-mock` plays any of the four CLIs in its own wire format, answering from a scenario: JSON
+rules matched against each prompt, whose replies stream text and reasoning, call tools, ask
+permission, pause, fail, crash or print noise (see `crates/maestro-mock/src/scenario.rs`).
+
+```sh
+cargo run -p maestro-mock -- install /tmp/mock-bin   # claude, codex, agy and opencode → maestro-mock
+PATH=/tmp/mock-bin:$PATH \
+  MAESTRO_MOCK_SCENARIO=crates/maestro-mock/scenarios/demo.json cargo run
+```
+
+With the demo scenario the commander answers with a two-step plan, and its workers run a
+command, ask permission for an edit and report back, so the whole app can be clicked through.
+`maestro-mock serve` is the same scenario as an OpenAI-compatible server
+(`/v1/chat/completions`, streamed or not, with tool calls), for pointing a real CLI at.
 
 ## Build
 

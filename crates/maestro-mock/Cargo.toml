@@ -1,0 +1,21 @@
+[package]
+name = "maestro-mock"
+description = "Stand-ins for the coding-agent CLIs and an OpenAI-compatible server, scripted by rules, for tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+maestro-agents.workspace = true
+maestro-core.workspace = true
+tempfile.workspace = true

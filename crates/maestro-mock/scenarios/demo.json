@@ -1,0 +1,92 @@
+{
+  "stream": {
+    "chunk": 6,
+    "delay_ms": 30
+  },
+  "rules": [
+    {
+      "when": {
+        "read_only": true,
+        "prompt_contains": "slow"
+      },
+      "reply": [
+        {
+          "think": "Taking my time."
+        },
+        {
+          "sleep_ms": 5000
+        },
+        {
+          "say": "Sorry for the wait. What should I plan?"
+        }
+      ]
+    },
+    {
+      "when": {
+        "read_only": true,
+        "prompt_contains": "fail"
+      },
+      "reply": [
+        {
+          "say": "Let me see..."
+        },
+        {
+          "fail": "The mock provider is rate limited."
+        }
+      ]
+    },
+    {
+      "when": {
+        "read_only": true
+      },
+      "reply": [
+        {
+          "think": "The request is small: one step to write, one to test."
+        },
+        {
+          "say": "Here is a two-step plan.\n```maestro-plan\n{\n \"title\": \"Add a greeting\",\n \"nodes\": [\n  {\n   \"key\": \"write\",\n   \"title\": \"Write the greeting\",\n   \"instructions\": \"Add greet() to src/lib.rs\",\n   \"difficulty\": \"easy\",\n   \"depends_on\": []\n  },\n  {\n   \"key\": \"test\",\n   \"title\": \"Test it\",\n   \"instructions\": \"Add a test for greet()\",\n   \"difficulty\": \"easy\",\n   \"depends_on\": [\n    \"write\"\n   ]\n  }\n ]\n}\n```"
+        }
+      ]
+    },
+    {
+      "when": {
+        "prompt_contains": "greet"
+      },
+      "reply": [
+        {
+          "think": "Look at the crate first."
+        },
+        {
+          "say": "Reading the crate."
+        },
+        {
+          "tool": {
+            "name": "Bash",
+            "input": {
+              "command": "ls src"
+            },
+            "output": "lib.rs"
+          }
+        },
+        {
+          "tool": {
+            "name": "Edit",
+            "input": {
+              "file_path": "src/lib.rs"
+            },
+            "output": "Edited src/lib.rs",
+            "ask": true
+          }
+        },
+        {
+          "say": "Done: `greet()` is in `src/lib.rs`."
+        }
+      ]
+    }
+  ],
+  "otherwise": [
+    {
+      "say": "(mock) You said: {prompt}"
+    }
+  ]
+}

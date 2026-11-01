@@ -3712,6 +3712,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maestro-mock"
+version = "0.1.0"
+dependencies = [
+ "maestro-agents",
+ "maestro-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "maestro-protocol"
 version = "0.1.0"
 dependencies = [
