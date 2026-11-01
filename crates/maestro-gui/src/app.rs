@@ -820,6 +820,7 @@ impl Maestro {
             tags: Vec::new(),
             delegate: false,
             origin: NodeOrigin::User,
+            conversation: None,
         };
         self.request(Command::AddNode { workflow, node }, cx, move |this, reply, _| {
             if let Reply::NodeAdded { node } = reply {

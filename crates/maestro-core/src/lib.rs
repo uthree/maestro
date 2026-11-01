@@ -22,8 +22,8 @@ pub use agent::{AgentRole, AgentSpec};
 pub use event::{AgentEvent, PermissionKind, PermissionRequest, ToolCall};
 pub use id::{AgentId, NodeId, ProjectId, ResourceId, WorkflowId};
 pub use plan::{
-    COMMANDER_INSTRUCTIONS, LEAD_INSTRUCTIONS, Plan, PlanError, PlanNode, WORKER_INSTRUCTIONS,
-    status_report,
+    COMMANDER_INSTRUCTIONS, CONVERSATION_LIMIT, LEAD_INSTRUCTIONS, PLAN_REJECTED, Plan,
+    PlanContext, PlanError, PlanNode, WORKER_INSTRUCTIONS, conversation, status_report,
 };
 pub use project::{Checkout, Placement, Project, ProjectError, ProjectResource, Resource};
 pub use provider::{Effort, ModelChoice, ModelGrade, ProviderKind, ProviderStatus, SetupAction};

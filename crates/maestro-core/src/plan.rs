@@ -15,12 +15,17 @@
 //! A step too big for one worker can be delegated (`"delegate": true`): a lead, started with
 //! [`LEAD_INSTRUCTIONS`], plans that step alone in the same format, and its plan becomes a
 //! workflow under the step. A lead may delegate in turn, so plans nest as deep as the work does.
+//!
+//! Every handover loses detail, so the commander's default is not to split at all: one step that
+//! inherits the conversation (`"context": "conversation"`). Maestro hands its worker what the
+//! user and the planner said, as [`conversation`] renders it, alongside the step's instructions.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::event::AgentEvent;
 use crate::id::{ResourceId, WorkflowId};
 use crate::routing::Difficulty;
 use crate::workflow::{
@@ -33,7 +38,9 @@ pub const PLAN_FENCE: &str = "maestro-plan";
 /// What the commander is told before the user's first message.
 pub const COMMANDER_INSTRUCTIONS: &str = r#"You are Maestro's commander. You talk with the user, understand what they want, and plan the work; you never do the work yourself. You must not edit files or run commands that change anything. Reading the repository to plan well is fine.
 
-Workers carry out the plan. Each node of a plan goes to one worker, which runs in its own git worktree with the work of the nodes it depends on already merged in. Workers see only their node's instructions, so make each one complete on its own: what to change, where, and how to know it is done. Prefer a few substantial nodes to many tiny ones, and make nodes independent where you can so they run in parallel.
+Workers carry out the plan. Each node of a plan goes to one worker, which runs in its own git worktree with the work of the nodes it depends on already merged in. A worker sees its node's instructions and the replies of the workers before it, so make each node's instructions complete on its own: what to change, where, and how to know it is done.
+
+Every split loses detail, so most jobs should be a single node with "context": "conversation". Maestro then hands that worker this conversation with the user as well as the node's instructions, and one worker with the whole picture does the job. Split the work into several nodes only when the parts are independent enough to run in parallel and each needs little of the rest, when they work in different repositories, or when the job is too large for one worker to hold. Cut such nodes where little context crosses between them, not by kind of work, and give a node "context": "conversation" whenever this conversation matters to it.
 
 Rate each node's difficulty, which decides the model and effort it gets: "trivial" (mechanical), "easy" (small and well specified), "moderate" (ordinary feature or bug work), "hard" (design, many files, subtle behaviour) or "expert" (open-ended design, an unexplained bug). Tag each node with one to three short lowercase words for the kind of work, such as "ui", "api", "tests", "docs" or "refactor"; Maestro learns which models do well at which kind. Reuse the same words for the same kind of work.
 
@@ -43,12 +50,12 @@ Discuss the plan with the user first. Once they agree, include it in your reply 
 {"title": "Short name of the whole job",
  "resource": "r1",
  "nodes": [
-   {"key": "api", "title": "Add the endpoint", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": []},
+   {"key": "api", "title": "Add the endpoint", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": [], "context": "conversation"},
    {"key": "ui", "title": "Show it in the UI", "instructions": "...", "difficulty": "easy", "tags": ["ui"], "depends_on": ["api"]}
  ]}
 ```
 
-Keys are short names used only to express dependencies within the plan.
+Keys are short names used only to express dependencies within the plan. The example has two nodes to show dependencies; a single node is the usual plan.
 
 A node too large or too open for one worker can be handed to a lead instead: add "delegate": true and describe the outcome wanted rather than the steps. A lead is an agent like you that plans that node alone as a plan of its own, with workers (or leads of its own) under it, and the node succeeds once the lead's plan has. Delegate only what genuinely needs planning of its own; most nodes should go straight to a worker.
 
@@ -61,7 +68,7 @@ A plan starts running as soon as you write it, so write the block only once the 
 /// What a lead is told before the step it plans.
 pub const LEAD_INSTRUCTIONS: &str = r#"You are a Maestro lead. A step of a larger plan was handed to you because it needs planning of its own: you plan it as a plan of smaller steps, and workers carry them out. You never do the work yourself. You must not edit files or run commands that change anything. Reading the repository, which is checked out here with the work of the steps before yours merged in, to plan well is fine.
 
-Each node of your plan goes to one worker, which runs in its own git worktree starting from this one, with the work of the nodes it depends on already merged in. Workers see only their node's instructions, so make each one complete on its own: what to change, where, and how to know it is done. Prefer a few substantial nodes to many tiny ones, and make nodes independent where you can so they run in parallel. A node that itself needs planning of its own can go to a lead under you: add "delegate": true and describe the outcome wanted.
+Each node of your plan goes to one worker, which runs in its own git worktree starting from this one, with the work of the nodes it depends on already merged in. A worker sees its node's instructions and the replies of the workers before it, so make each node's instructions complete on its own: what to change, where, and how to know it is done. Every split loses detail: split only where the parts are independent enough to run in parallel, cut nodes where little context crosses between them, and prefer one substantial node to several that need each other's details. Add "context": "conversation" to a node to hand its worker what was said to you here, the step you were given and anything the user told you, as well as its instructions. A node that itself needs planning of its own can go to a lead under you: add "delegate": true and describe the outcome wanted.
 
 Rate each node's difficulty: "trivial", "easy", "moderate", "hard" or "expert"; it decides the model and effort the node gets. Tag each node with one to three short lowercase words for the kind of work, such as "ui", "api", "tests", "docs" or "refactor".
 
@@ -70,7 +77,7 @@ Write the plan in your reply exactly once, as a fenced block:
 ```maestro-plan
 {"title": "Short name of this step's work",
  "nodes": [
-   {"key": "model", "title": "Add the data model", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": []},
+   {"key": "model", "title": "Add the data model", "instructions": "...", "difficulty": "moderate", "tags": ["api"], "depends_on": [], "context": "conversation"},
    {"key": "tests", "title": "Test it", "instructions": "...", "difficulty": "easy", "tags": ["tests"], "depends_on": ["model"]}
  ]}
 ```
@@ -118,6 +125,20 @@ pub struct PlanNode {
     /// Hand the step to a lead, who plans it as a workflow of its own.
     #[serde(default)]
     pub delegate: bool,
+    /// What the step's agent is handed besides its instructions.
+    #[serde(default)]
+    pub context: PlanContext,
+}
+
+/// What a step's agent is handed besides its instructions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanContext {
+    /// Its instructions alone.
+    #[default]
+    Instructions,
+    /// The planner's conversation, as [`conversation`] renders it, as well.
+    Conversation,
 }
 
 /// Why a plan could not become a workflow.
@@ -183,12 +204,14 @@ impl Plan {
     }
 
     /// The plan as a workflow, every node marked as the commander's. `exists` says whether a
-    /// node of another workflow, named in a step's `after`, is there to wait on.
+    /// node of another workflow, named in a step's `after`, is there to wait on, and
+    /// `conversation` is what a step that asks for the conversation is handed.
     pub fn into_workflow(
         self,
         id: WorkflowId,
         target: Option<WorkflowTarget>,
         exists: impl Fn(NodeRef) -> bool,
+        conversation: Option<&str>,
     ) -> Result<Workflow, PlanError> {
         let mut workflow = Workflow::new(id, self.title);
         workflow.target = target;
@@ -202,6 +225,10 @@ impl Plan {
                 tags: node.tags.clone(),
                 delegate: node.delegate,
                 origin: NodeOrigin::Commander,
+                conversation: match node.context {
+                    PlanContext::Conversation => conversation.map(str::to_owned),
+                    PlanContext::Instructions => None,
+                },
             };
             if ids.insert(node.key.clone(), workflow.add_node(draft)).is_some() {
                 return Err(PlanError::DuplicateKey(node.key.clone()));
@@ -227,6 +254,77 @@ impl Plan {
         }
         Ok(workflow)
     }
+}
+
+/// What Maestro says to a planner when a plan of its reply could not be used.
+pub const PLAN_REJECTED: &str = "Maestro could not use that plan";
+
+/// How long a rendered conversation may be, in characters; older messages are left out first.
+pub const CONVERSATION_LIMIT: usize = 24_000;
+
+/// A planner's conversation as a worker reads it: each message to the planner and each of its
+/// replies, oldest first, without the plans it wrote (the worker has its own step's) or Maestro's
+/// notes about plans it could not use. When it is longer than `limit` characters, the oldest
+/// messages are left out, and it says so. `None` when nothing was said.
+pub fn conversation(transcript: &[AgentEvent], limit: usize) -> Option<String> {
+    let mut messages = Vec::new();
+    for event in transcript {
+        let (who, text) = match event {
+            AgentEvent::Prompted { text } if !text.starts_with(PLAN_REJECTED) => ("Message", text),
+            AgentEvent::TurnCompleted { answer } => ("Reply", answer),
+            _ => continue,
+        };
+        let text = without_plans(text);
+        let text = text.trim();
+        if !text.is_empty() {
+            messages.push(format!("## {who}\n\n{text}"));
+        }
+    }
+    let mut kept = Vec::new();
+    let mut length = 0;
+    for message in messages.iter().rev() {
+        let size = message.chars().count() + 2;
+        if length + size > limit && !kept.is_empty() {
+            break;
+        }
+        length += size;
+        kept.push(message.as_str());
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    let left_out = messages.len() - kept.len();
+    kept.reverse();
+    let mut text = kept.join("\n\n");
+    if text.chars().count() > limit {
+        // A single message longer than the limit: keep its end, the newest part.
+        let skip = text.chars().count() - limit;
+        text = text.chars().skip(skip).collect();
+    }
+    if left_out > 0 {
+        text = format!("({left_out} earlier messages left out)\n\n{text}");
+    }
+    Some(text)
+}
+
+/// `text` with every `maestro-plan` block replaced by a note that a plan was written there.
+fn without_plans(text: &str) -> String {
+    let opening = format!("```{PLAN_FENCE}");
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&opening) {
+        out.push_str(&rest[..start]);
+        let body = &rest[start + opening.len()..];
+        out.push_str("(a plan was written here)");
+        match body.find("```") {
+            Some(end) => rest = &body[end + 3..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// How many workflows a status report lists at most, newest first.
@@ -291,7 +389,7 @@ mod tests {
     fn the_example_in_the_instructions_is_a_valid_plan() {
         let plans = Plan::extract(COMMANDER_INSTRUCTIONS);
         let [Ok(plan)] = &plans[..] else { panic!("{plans:?}") };
-        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false).unwrap();
+        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false, None).unwrap();
         assert_eq!(workflow.topological_order(), [NodeId(1), NodeId(2)]);
         assert_eq!(workflow.node(NodeId(2)).unwrap().difficulty, Some(Difficulty::Easy));
         assert_eq!(workflow.node(NodeId(2)).unwrap().tags, ["ui"]);
@@ -303,7 +401,7 @@ mod tests {
         let plans = Plan::extract(LEAD_INSTRUCTIONS);
         let [Ok(plan)] = &plans[..] else { panic!("{plans:?}") };
         assert_eq!(plan.resources(), Ok((None, None)));
-        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false).unwrap();
+        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false, None).unwrap();
         assert_eq!(workflow.topological_order(), [NodeId(1), NodeId(2)]);
     }
 
@@ -311,7 +409,7 @@ mod tests {
     fn a_step_can_be_delegated() {
         let text = "```maestro-plan\n{\"title\":\"t\",\"nodes\":[{\"key\":\"a\",\"title\":\"A\",\"instructions\":\"\",\"difficulty\":\"hard\",\"delegate\":true},{\"key\":\"b\",\"title\":\"B\",\"instructions\":\"\",\"difficulty\":\"easy\"}]}\n```";
         let [Ok(plan)] = &Plan::extract(text)[..] else { panic!() };
-        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false).unwrap();
+        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false, None).unwrap();
         assert!(workflow.node(NodeId(1)).unwrap().delegate);
         assert!(!workflow.node(NodeId(2)).unwrap().delegate);
     }
@@ -337,19 +435,25 @@ mod tests {
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
             after: Vec::new(),
             delegate: false,
+            context: PlanContext::Instructions,
         };
         let plan = |nodes| Plan { title: "t".into(), resource: None, machine: None, nodes };
         let id = WorkflowId(1);
         assert!(matches!(
-            plan(vec![node("a", &["b"]), node("b", &["a"])]).into_workflow(id, None, |_| false),
+            plan(vec![node("a", &["b"]), node("b", &["a"])]).into_workflow(
+                id,
+                None,
+                |_| false,
+                None
+            ),
             Err(PlanError::Cycle(_))
         ));
         assert_eq!(
-            plan(vec![node("a", &["z"])]).into_workflow(id, None, |_| false),
+            plan(vec![node("a", &["z"])]).into_workflow(id, None, |_| false, None),
             Err(PlanError::UnknownDependency { step: "a".into(), missing: "z".into() })
         );
         assert_eq!(
-            plan(vec![node("a", &[]), node("a", &[])]).into_workflow(id, None, |_| false),
+            plan(vec![node("a", &[]), node("a", &[])]).into_workflow(id, None, |_| false, None),
             Err(PlanError::DuplicateKey("a".into()))
         );
     }
@@ -366,6 +470,7 @@ mod tests {
             depends_on: Vec::new(),
             after: vec![after.into()],
             delegate: false,
+            context: PlanContext::Instructions,
         };
         let plan = |after| Plan {
             title: "t".into(),
@@ -374,12 +479,17 @@ mod tests {
             nodes: vec![step(after)],
         };
         let exists = |other| other == earlier;
-        let flow = plan("wf1/n2").into_workflow(WorkflowId(2), None, exists).unwrap();
+        let flow = plan("wf1/n2").into_workflow(WorkflowId(2), None, exists, None).unwrap();
         assert_eq!(flow.node(NodeId(1)).unwrap().after, [earlier]);
         // Not there, not an id, and not earlier: the plan's own workflow is wf2.
         for wrong in ["wf1/n3", "the api step", "wf2/n1"] {
             assert_eq!(
-                plan(wrong).into_workflow(WorkflowId(2), None, |other| other.node != NodeId(3)),
+                plan(wrong).into_workflow(
+                    WorkflowId(2),
+                    None,
+                    |other| other.node != NodeId(3),
+                    None
+                ),
                 Err(PlanError::UnknownWork { step: "a".into(), missing: wrong.into() })
             );
         }
@@ -398,12 +508,14 @@ mod tests {
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
             after: after.iter().map(|&key| key.to_owned()).collect(),
             delegate: false,
+            context: PlanContext::Instructions,
         };
-        let mut first =
-            plan(vec![node("a", &[], &[])]).into_workflow(WorkflowId(1), None, |_| false).unwrap();
+        let mut first = plan(vec![node("a", &[], &[])])
+            .into_workflow(WorkflowId(1), None, |_| false, None)
+            .unwrap();
         first.started = true;
         let second = plan(vec![node("b", &[], &["wf1/n1"]), node("c", &["b"], &[])])
-            .into_workflow(WorkflowId(2), None, |_| true)
+            .into_workflow(WorkflowId(2), None, |_| true, None)
             .unwrap();
         let report = status_report([&first, &second]).unwrap();
         assert_eq!(
@@ -416,5 +528,52 @@ mod tests {
              - wf1/n1 \"A\": waiting\n\
              </maestro-status>"
         );
+    }
+
+    #[test]
+    fn a_step_can_inherit_the_conversation() {
+        let text = "```maestro-plan\n{\"title\":\"t\",\"nodes\":[{\"key\":\"a\",\"title\":\"A\",\"instructions\":\"\",\"difficulty\":\"easy\",\"context\":\"conversation\"},{\"key\":\"b\",\"title\":\"B\",\"instructions\":\"\",\"difficulty\":\"easy\"}]}\n```";
+        let [Ok(plan)] = &Plan::extract(text)[..] else { panic!() };
+        assert_eq!(plan.nodes[0].context, PlanContext::Conversation);
+        assert_eq!(plan.nodes[1].context, PlanContext::Instructions);
+        let workflow =
+            plan.clone().into_workflow(WorkflowId(1), None, |_| false, Some("said")).unwrap();
+        assert_eq!(workflow.node(NodeId(1)).unwrap().conversation.as_deref(), Some("said"));
+        assert_eq!(workflow.node(NodeId(2)).unwrap().conversation, None);
+    }
+
+    #[test]
+    fn the_conversation_leaves_out_plans_and_maestros_notes() {
+        let transcript = [
+            AgentEvent::Started,
+            AgentEvent::Prompted { text: "Add dark mode, but keep the logo blue.".into() },
+            AgentEvent::Text { text: "partial".into() },
+            AgentEvent::TurnCompleted { answer: "Shall I?".into() },
+            AgentEvent::Prompted { text: "Yes.".into() },
+            AgentEvent::TurnCompleted {
+                answer: "Here it is:\n```maestro-plan\n{}\n```\nStarted.".into(),
+            },
+            AgentEvent::Prompted { text: format!("{PLAN_REJECTED}: bad. Please write it again.") },
+        ];
+        assert_eq!(
+            conversation(&transcript, CONVERSATION_LIMIT).unwrap(),
+            "## Message\n\nAdd dark mode, but keep the logo blue.\n\n## Reply\n\nShall I?\n\n\
+             ## Message\n\nYes.\n\n## Reply\n\nHere it is:\n(a plan was written here)\nStarted."
+        );
+        assert_eq!(conversation(&[AgentEvent::Started], CONVERSATION_LIMIT), None);
+    }
+
+    #[test]
+    fn a_long_conversation_keeps_its_newest_messages() {
+        let transcript: Vec<AgentEvent> = (0..10)
+            .map(|index| AgentEvent::Prompted {
+                text: format!("message {index} {}", "x".repeat(20)),
+            })
+            .collect();
+        let text = conversation(&transcript, 100).unwrap();
+        assert!(text.starts_with("(8 earlier messages left out)"), "{text}");
+        assert!(text.contains("message 8") && text.ends_with(&"x".repeat(20)));
+        let one = [AgentEvent::Prompted { text: "y".repeat(500) }];
+        assert_eq!(conversation(&one, 100).unwrap().chars().count(), 100);
     }
 }

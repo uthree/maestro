@@ -668,6 +668,30 @@ impl Maestro {
                             }))
                     })),
             )
+            .when_some(node.conversation.as_ref(), |details, said| {
+                // Each message starts with a heading: "## Message" or "## Reply".
+                let messages = said.matches("\n## ").count() + usize::from(said.starts_with("## "));
+                details.child(
+                    group()
+                        .child(label(tr("Context", "文脈")))
+                        .child(
+                            Badge::new(trf!(
+                                "Inherits the conversation ({} messages)",
+                                "会話を引き継ぎます（{} 件の発言）",
+                                messages
+                            ))
+                            .icon(IconName::Sparkles),
+                        )
+                        .child(
+                            Label::new(tr(
+                                "Its agent is handed what you and the planner said before the plan, as well as the instructions",
+                                "指示に加えて、計画の前にあなたと計画者が話した内容をエージェントに渡します",
+                            ))
+                            .size(TextSize::XSmall)
+                            .color(TextColor::Faint),
+                        ),
+                )
+            })
             .when(!node.contenders.is_empty(), |details| details.child(self.contenders(node, cx)))
             .child(
                 group()

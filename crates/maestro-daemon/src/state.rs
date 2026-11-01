@@ -350,6 +350,7 @@ mod tests {
             tags: Vec::new(),
             delegate: false,
             origin: NodeOrigin::User,
+            conversation: None,
         }
     }
 

@@ -76,6 +76,9 @@ pub struct NodeDraft {
     pub delegate: bool,
     /// Who wrote it.
     pub origin: NodeOrigin,
+    /// The planner's conversation, handed to its agent with the instructions.
+    #[serde(default)]
+    pub conversation: Option<String>,
 }
 
 /// Changes to a node the user or the commander makes after it was added. `None` leaves a field
@@ -121,6 +124,11 @@ pub struct Node {
     pub delegate: bool,
     /// Who wrote it.
     pub origin: NodeOrigin,
+    /// The conversation of the commander or lead that planned it, as far as it had got when the
+    /// plan was written, which its agent is handed with the instructions. `None` hands over the
+    /// instructions alone.
+    #[serde(default)]
+    pub conversation: Option<String>,
     /// Where it is in its life.
     pub status: NodeStatus,
     /// The worker on it, once one has started. A user's message to the node goes to this agent.
@@ -370,7 +378,16 @@ impl Workflow {
     pub fn add_node(&mut self, draft: NodeDraft) -> NodeId {
         let id = NodeId(self.next_node);
         self.next_node += 1;
-        let NodeDraft { title, instructions, model, difficulty, tags, delegate, origin } = draft;
+        let NodeDraft {
+            title,
+            instructions,
+            model,
+            difficulty,
+            tags,
+            delegate,
+            origin,
+            conversation,
+        } = draft;
         let status = NodeStatus::Pending;
         let node = Node {
             id,
@@ -381,6 +398,7 @@ impl Workflow {
             tags,
             delegate,
             origin,
+            conversation,
             status,
             agent: None,
             branch: None,
@@ -673,6 +691,7 @@ mod tests {
             tags: Vec::new(),
             delegate: false,
             origin: NodeOrigin::Commander,
+            conversation: None,
         }
     }
 
