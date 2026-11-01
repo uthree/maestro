@@ -178,7 +178,29 @@ impl Maestro {
             .child(
                 FormField::new(what)
                     .description(hint)
-                    .child(TextField::new().child(input::editor(&self.fields.resource))),
+                    .child(TextField::new().child(input::editor(&self.fields.resource)))
+                    .when(self.resource_kind == 1, |field| {
+                        // The system's dialog shows this computer's folders, so it can only
+                        // pick one for a daemon that runs here.
+                        let here = self.folder_is_here(hosts.get(host));
+                        field.child(
+                            Button::new("choose-folder", tr("Choose…", "選択…"))
+                                .icon(IconName::Folder)
+                                .size(ControlSize::Small)
+                                .disabled(!here)
+                                .tooltip(if here {
+                                    tr("Pick the folder in a dialog", "ダイアログでフォルダを選ぶ")
+                                } else {
+                                    tr(
+                                        "A folder on another machine is typed in",
+                                        "別のマシンのフォルダはパスを入力してください",
+                                    )
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_folder(window, cx)
+                                })),
+                        )
+                    }),
             )
             .when(self.resource_kind < 2, |group| {
                 group.child(
