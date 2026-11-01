@@ -14,8 +14,8 @@ use atelier::{
 };
 use futures::StreamExt;
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, IntoElement, ParentElement, Pixels, Render,
-    ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
+    AnyWindowHandle, App, Context, Entity, IntoElement, ParentElement, PathPromptOptions, Pixels,
+    Render, ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::input::InputState;
 use maestro_client::mirror::Notice;
@@ -677,6 +677,46 @@ impl Maestro {
         };
         input::clear(&self.fields.resource, window, cx);
         self.command(Command::AddResource { project, resource }, cx);
+    }
+
+    /// Whether a folder on `host` is on this computer, where the system's folder dialog looks.
+    /// `Host::Local` is the daemon's machine, which is this one only when the daemon was
+    /// started here.
+    pub(crate) fn folder_is_here(&self, host: Option<&Host>) -> bool {
+        matches!(host, Some(Host::Local)) && matches!(self.launch, Launch::Local { .. })
+    }
+
+    /// Opens the system's folder dialog and writes the chosen folder into the path field.
+    pub(crate) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr("Choose", "選択").into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                // Cancelled, or the window went away.
+                Ok(Ok(None)) | Err(_) => None,
+                Ok(Err(error)) => {
+                    let message = trf!(
+                        "The folder dialog did not open ({error}). Type the path instead.",
+                        "フォルダ選択ダイアログを開けませんでした（{error}）。パスを入力してください。"
+                    );
+                    this.update(cx, |this, cx| this.refuse(&message, cx)).ok();
+                    None
+                }
+            };
+            let Some(path) = path else { return };
+            this.update_in(cx, |this, window, cx| {
+                let path = path.display().to_string();
+                this.fields.resource.update(cx, |state, cx| state.set_value(path, window, cx));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The machines a folder can be on: the daemon's, then the open project's SSH machines.
