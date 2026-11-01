@@ -12,7 +12,10 @@ use maestro_core::{AgentEvent, Effort, PermissionKind, PermissionRequest, ToolCa
 use maestro_host::HostCommand;
 use serde_json::{Value, json};
 
-use crate::{Adapter, Output, WorkerConfig, with_instructions};
+use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, with_instructions};
+
+/// What a refused step reports, and what `agy` is told.
+const REFUSED: &str = "The user refused this action.";
 
 pub(crate) struct Antigravity {
     config: WorkerConfig,
@@ -21,19 +24,38 @@ pub(crate) struct Antigravity {
     /// The tool step still open, finished when the next step or the result arrives.
     open_tool: Option<String>,
     asked: HashMap<String, Value>,
+    /// Permission was refused for the open tool step, or for the next one if none is open:
+    /// `agy` never reports how a step ended, so a refused step would otherwise read as done.
+    refused: bool,
     /// Whether this turn's reply already arrived as text. `agy` often sends the reply only in
     /// its result, and a transcript built from events would then show nothing.
     said: bool,
+    /// A tool step came after this turn's text, so the next text starts a new message.
+    parted: bool,
 }
 
 impl Antigravity {
     pub(crate) fn new(config: WorkerConfig) -> Self {
-        Self { config, first: true, steps: 0, open_tool: None, asked: HashMap::new(), said: false }
+        Self {
+            config,
+            first: true,
+            steps: 0,
+            open_tool: None,
+            asked: HashMap::new(),
+            refused: false,
+            said: false,
+            parted: false,
+        }
     }
 
     fn close_tool(&mut self, output: &mut Output, ok: bool) {
         if let Some(id) = self.open_tool.take() {
-            output.events.push(AgentEvent::ToolFinished { id, ok, output: String::new() });
+            let event = if std::mem::take(&mut self.refused) {
+                AgentEvent::ToolFinished { id, ok: false, output: REFUSED.into() }
+            } else {
+                AgentEvent::ToolFinished { id, ok, output: String::new() }
+            };
+            output.events.push(event);
         }
     }
 }
@@ -88,6 +110,7 @@ impl Adapter for Antigravity {
                 let step = &message["step_update"];
                 self.close_tool(&mut output, true);
                 if step["step_type"] == "tool" {
+                    self.parted = self.said;
                     self.steps += 1;
                     let id = step["step_id"]
                         .as_str()
@@ -101,8 +124,12 @@ impl Adapter for Antigravity {
                         },
                     });
                 } else if let Some(text) = step["text"].as_str() {
+                    let mut text = text.to_owned();
+                    if std::mem::take(&mut self.parted) && !text.is_empty() {
+                        text.insert_str(0, PARAGRAPH);
+                    }
                     self.said = true;
-                    output.events.push(AgentEvent::Text { text: text.into() });
+                    output.events.push(AgentEvent::Text { text });
                 }
             }
             Some("control_request") => {
@@ -130,6 +157,8 @@ impl Adapter for Antigravity {
                 let result = &message["result"];
                 let ok = result["status"] == "SUCCESS";
                 self.close_tool(&mut output, ok);
+                self.refused = false;
+                self.parted = false;
                 self.asked.clear();
                 let answer = result["response"].as_str().unwrap_or_default().to_owned();
                 if ok && !std::mem::take(&mut self.said) && !answer.is_empty() {
@@ -156,7 +185,8 @@ impl Adapter for Antigravity {
         let response = if allow {
             json!({"behavior": "allow", "updatedInput": input})
         } else {
-            json!({"behavior": "deny", "message": "The user refused this action."})
+            self.refused = true;
+            json!({"behavior": "deny", "message": REFUSED})
         };
         vec![json!({"event": "control_response", "response": {
             "subtype": "success", "request_id": request, "response": response}})]
@@ -204,5 +234,31 @@ mod tests {
         assert_eq!(events[3], AgentEvent::Text { text: "Fixed.".into() });
         assert_eq!(events[4], AgentEvent::TurnCompleted { answer: "Fixed.".into() });
         assert_eq!(agy.send("More")[0]["message"]["content"], "More");
+    }
+
+    #[test]
+    fn a_refused_step_finishes_as_failed() {
+        let mut agy = Antigravity::new(config(ProviderKind::Antigravity));
+        let step = |id: &str| json!({"event":"step_update","step_update":{"step_type":"tool","step_id":id,"tool_name":"run_command"}});
+        let ask = |id: &str| json!({"event":"control_request","request_id":id,"request":{"subtype":"can_use_tool","tool_name":"run_command","input":{}}});
+        let mut events = Vec::new();
+        events.extend(agy.receive(step("s1")).events);
+        events.extend(agy.receive(ask("p1")).events);
+        assert_eq!(agy.answer("p1", false)[0]["response"]["response"]["behavior"], "deny");
+        events.extend(agy.receive(step("s2")).events);
+        events.extend(agy.receive(ask("p2")).events);
+        agy.answer("p2", true);
+        events.extend(
+            agy.receive(json!({"event":"result","result":{"status":"SUCCESS","response":"Ok"}}))
+                .events,
+        );
+        let finished: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolFinished { id, ok, .. } => Some((id.as_str(), *ok)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished, [("s1", false), ("s2", true)]);
     }
 }

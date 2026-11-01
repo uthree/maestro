@@ -13,7 +13,7 @@ use maestro_host::HostCommand;
 use serde_json::{Value, json};
 
 use crate::rpc::{self, Calls};
-use crate::{Adapter, Output, WorkerConfig, content_text, with_instructions};
+use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text, with_instructions};
 
 enum Purpose {
     Initialize,
@@ -31,6 +31,8 @@ pub(crate) struct OpenCode {
     asked: HashMap<String, (Value, Value)>,
     /// Tool calls already reported as started, so updates do not start them twice.
     started: Vec<String>,
+    /// A tool call came after this turn's text, so the next text starts a new message.
+    parted: bool,
     first: bool,
 }
 
@@ -44,12 +46,14 @@ impl OpenCode {
             answer: String::new(),
             asked: HashMap::new(),
             started: Vec::new(),
+            parted: false,
             first: true,
         }
     }
 
     fn prompt(&mut self, session: &str, text: &str) -> Value {
         self.answer.clear();
+        self.parted = false;
         let text = if std::mem::take(&mut self.first) {
             with_instructions(&self.config.instructions, text)
         } else {
@@ -135,7 +139,12 @@ impl OpenCode {
         let kind = update["sessionUpdate"].as_str().unwrap_or_default();
         let event = match kind {
             "agent_message_chunk" => {
-                let text = update["content"]["text"].as_str().unwrap_or_default().to_owned();
+                let mut text = update["content"]["text"].as_str().unwrap_or_default().to_owned();
+                // ACP streams a message after a tool call as more chunks; it reads as a new
+                // paragraph, as in the other adapters.
+                if std::mem::take(&mut self.parted) && !text.is_empty() {
+                    text.insert_str(0, PARAGRAPH);
+                }
                 self.answer.push_str(&text);
                 AgentEvent::Text { text }
             }
@@ -143,6 +152,9 @@ impl OpenCode {
                 text: update["content"]["text"].as_str().unwrap_or_default().into(),
             },
             "tool_call" | "tool_call_update" => {
+                if !self.answer.is_empty() {
+                    self.parted = true;
+                }
                 let id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
                 let done = matches!(update["status"].as_str(), Some("completed" | "failed"));
                 if done {
@@ -286,18 +298,23 @@ mod tests {
             update(json!({"sessionUpdate":"tool_call","toolCallId":"c","title":"bash","status":"pending","rawInput":{"command":"ls"}})),
             update(json!({"sessionUpdate":"tool_call_update","toolCallId":"c","status":"in_progress"})),
             update(json!({"sessionUpdate":"tool_call_update","toolCallId":"c","status":"completed","content":[{"type":"content","content":{"type":"text","text":"a"}}]})),
+            update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done"}})),
+            update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"."}})),
             json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"other","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"x"}}}}),
             json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}}),
         ]
         .into_iter()
         .flat_map(|line| opencode.receive(line).events)
         .collect();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 6);
         assert_eq!(
             events[2],
             AgentEvent::ToolFinished { id: "c".into(), ok: true, output: "a".into() }
         );
-        assert_eq!(events[3], AgentEvent::TurnCompleted { answer: "Ok".into() });
+        // The message after the tool call is a new paragraph, once.
+        assert_eq!(events[3], AgentEvent::Text { text: "\n\nDone".into() });
+        assert_eq!(events[4], AgentEvent::Text { text: ".".into() });
+        assert_eq!(events[5], AgentEvent::TurnCompleted { answer: "Ok\n\nDone.".into() });
     }
 
     #[test]
