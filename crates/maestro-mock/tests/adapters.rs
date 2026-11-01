@@ -103,15 +103,9 @@ fn a_turn_streams_reasons_calls_tools_and_asks_permission_on_every_cli() {
         let Some(AgentEvent::TurnCompleted { answer }) = events.last() else {
             panic!("{label} did not complete: {events:#?}")
         };
-        // How two messages of one turn are joined is up to each adapter.
-        let joined = match provider {
-            ProviderKind::OpenCode => "Looking.Done.",
-            _ => "Looking.\n\nDone.",
-        };
-        assert_eq!(answer, joined, "{label}");
-        if provider != ProviderKind::Antigravity {
-            assert_eq!(&text(&events), answer, "{label}: the streamed text is the answer");
-        }
+        // Two messages of one turn read as two paragraphs, in the answer and as streamed.
+        assert_eq!(answer, "Looking.\n\nDone.", "{label}");
+        assert_eq!(&text(&events), answer, "{label}: the streamed text is the answer");
 
         let asked: Vec<_> = events
             .iter()
@@ -133,11 +127,7 @@ fn a_turn_streams_reasons_calls_tools_and_asks_permission_on_every_cli() {
                 _ => None,
             })
             .collect();
-        match provider {
-            // `agy` never says how a step ended.
-            ProviderKind::Antigravity => assert_eq!(finished, [true, true], "{label}"),
-            _ => assert_eq!(finished, [true, false], "{label}: the refused call failed"),
-        }
+        assert_eq!(finished, [true, false], "{label}: the refused call failed");
         let reasoned = count(&events, |event| matches!(event, AgentEvent::Reasoning { .. }));
         assert_eq!(reasoned > 0, provider != ProviderKind::Antigravity, "{label}");
     }
