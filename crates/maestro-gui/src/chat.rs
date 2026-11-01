@@ -21,6 +21,7 @@ use crate::app::{Maestro, Progress};
 use crate::dropdown::{self, Menu};
 use crate::graph::model_label;
 use crate::i18n::tr;
+use crate::markdown::Markdown;
 use crate::{input, trf};
 
 /// The widest the transcript and the composer grow, so lines stay easy to read on a wide screen.
@@ -141,6 +142,7 @@ impl Maestro {
                     // who is who; the model moves to the footer.
                     AssistantMessage::new(text.clone())
                         .id(element("assistant", &key))
+                        .body(Markdown::new(element("markdown", &key), text.clone()))
                         .anonymous()
                         .when_some(logo, AssistantMessage::logo)
                         .meta(meta.clone())

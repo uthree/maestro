@@ -16,6 +16,7 @@ maestro-client.workspace = true
 maestro-core.workspace = true
 # The daemon rides in the same executable, so a local window never meets an older one.
 maestro-daemon.workspace = true
+maestro-markdown.workspace = true
 maestro-protocol.workspace = true
 
 # `runtime_shaders` compiles the Metal shaders at start-up, so the app builds on a Mac with only
@@ -26,6 +27,12 @@ atelier = { git = "https://github.com/uthree/design-language", rev = "45b7d79c34
 # Only for its text input (caret, selection, IME); Atelier ships no editor. Later releases need
 # gpui snapshots, and 0.5.1 is the last on gpui 0.2.2.
 gpui-component = "=0.5.1"
+# Display maths typeset as KaTeX would, in pure Rust with its fonts built in; the formula is
+# drawn to an image in the theme's text colour. Inline maths stays text (maestro-markdown).
+ratex-parser = "=0.1.13"
+ratex-layout = "=0.1.13"
+ratex-render = { version = "=0.1.13", features = ["embed-fonts"] }
+ratex-types = "=0.1.13"
 # The daemon's events reach the window as a stream its tasks await.
 futures = "0.3"
 # `RUST_LOG=info maestro` shows what gpui says about the window and the GPU.

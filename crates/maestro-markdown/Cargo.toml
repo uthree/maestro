@@ -1,0 +1,16 @@
+[package]
+name = "maestro-markdown"
+description = "Reads an agent's Markdown, TeX and code into a model any Maestro frontend can draw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false }
+# Pure-Rust regexes, so building needs no C toolchain for Oniguruma.
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "regex-fancy", "parsing"] }
+
+[lints]
+workspace = true

@@ -14,6 +14,8 @@ The plan, and why the boundaries are where they are, is [docs/plan.md](docs/plan
 * **Provider formats stop at the adapter.** Each CLI's JSON is read only in its module of
   `maestro-agents`, which turns it into `AgentEvent`s. Adapters do no I/O, so test them by feeding
   recorded messages; `AgentSession` is the only place that touches a CLI's stdio.
+* **Rich text is read once, drawn per frontend.** Markdown, TeX and code highlighting are read
+  into a model by `maestro-markdown`, which knows no UI; each frontend only draws that model.
 * **Hosts are explicit.** Run processes through `maestro_host::HostCommand` with the `Host` they
   belong to; never build an `ssh` command line elsewhere.
 * **Workflows stay acyclic.** Every edit goes through `Workflow` methods, which refuse cycles and
