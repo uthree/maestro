@@ -26,6 +26,7 @@ mod graph;
 mod i18n;
 mod input;
 mod link;
+mod markdown;
 mod panels;
 mod prefs;
 mod project;
