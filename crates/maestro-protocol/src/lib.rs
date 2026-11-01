@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -727,6 +727,7 @@ mod tests {
             tags: Vec::new(),
             delegate: false,
             origin: maestro_core::NodeOrigin::User,
+            conversation: None,
         });
         let b = workflow.add_node(NodeDraft {
             title: "b".into(),
@@ -736,6 +737,7 @@ mod tests {
             tags: Vec::new(),
             delegate: false,
             origin: maestro_core::NodeOrigin::User,
+            conversation: None,
         });
         workflow.add_edge(a, b).unwrap();
         let sent = ServerMessage::Event { event: Event::WorkflowChanged { workflow } };

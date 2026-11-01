@@ -97,6 +97,7 @@ mod tests {
             tags: Vec::new(),
             delegate: false,
             origin: NodeOrigin::User,
+            conversation: None,
         };
         let (running, done) = (flow.add_node(draft("a")), flow.add_node(draft("b")));
         flow.set_status(running, NodeStatus::Running).unwrap();

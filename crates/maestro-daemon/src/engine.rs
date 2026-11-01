@@ -48,10 +48,11 @@ use std::thread;
 use std::time::Instant;
 
 use maestro_core::{
-    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, Checkout, Contender,
-    Difficulty, Host, LEAD_INSTRUCTIONS, ModelChoice, ModelKey, Node, NodeId, NodeRef, NodeStatus,
-    Outcome, Placement, Plan, Project, ProjectId, ProviderKind, ResourceId, WORKER_INSTRUCTIONS,
-    Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
+    AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, CONVERSATION_LIMIT,
+    Checkout, Contender, Difficulty, Host, LEAD_INSTRUCTIONS, ModelChoice, ModelKey, Node, NodeId,
+    NodeRef, NodeStatus, Outcome, PLAN_REJECTED, Placement, Plan, Project, ProjectId, ProviderKind,
+    ResourceId, WORKER_INSTRUCTIONS, Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
+    conversation,
 };
 use maestro_host::git;
 use maestro_host::github::{self, PullRequestDraft};
@@ -683,6 +684,8 @@ impl Engine {
             prompt.push_str(&format!(" Already done and merged here: {}.", done.join(", ")));
         }
         prompt.push_str(&format!("\n\n# {}\n\n{}", node.title, node.instructions));
+        prompt.push_str(&self.reports(flow, node));
+        prompt.push_str(&handed_conversation(node));
 
         let brief = Brief { merges, prompt };
         let branch = format!("maestro/{}-{}", flow.id, id);
@@ -727,6 +730,43 @@ impl Engine {
                 Ok(())
             }
         }
+    }
+
+    /// What the workers of the steps a node waits on said when they finished, as a section of
+    /// its first message, or nothing when none of them said anything. A lead's last reply is a
+    /// plan, not a report, so delegated steps are left out.
+    fn reports(&self, flow: &Workflow, node: &Node) -> String {
+        let mut before: Vec<(String, Option<AgentId>)> = flow
+            .dependencies(node.id)
+            .filter_map(|id| flow.node(id))
+            .filter(|dependency| !dependency.delegate)
+            .map(|dependency| (dependency.title.clone(), dependency.agent))
+            .collect();
+        for other in &node.after {
+            let Ok(earlier) = self.snapshot(other.workflow) else { continue };
+            let Some(dependency) = earlier.node(other.node).filter(|n| !n.delegate) else {
+                continue;
+            };
+            before.push((
+                format!("{} (from \"{}\")", dependency.title, earlier.title),
+                dependency.agent,
+            ));
+        }
+        let mut section = String::new();
+        for (title, agent) in before {
+            let Some(agent) = agent else { continue };
+            let Ok(Reply::Transcript { events }) =
+                self.runtime.execute(Command::GetTranscript { agent })
+            else {
+                continue;
+            };
+            let Some(answer) = last_answer(&events) else { continue };
+            section.push_str(&format!("\n\n## {title}\n\n{answer}"));
+        }
+        if section.is_empty() {
+            return section;
+        }
+        format!("\n\n# What the steps before this one reported{section}")
     }
 
     /// Makes a worktree on `branch` with the node's dependencies merged in, and starts a worker
@@ -836,8 +876,11 @@ impl Engine {
             let prompt = format!(
                 "This step is part of \"{}\". You planned it before, and the work of that plan is \
                  merged into this branch as far as it got.\n\n# {}\n\n{}\n\n# What the user asks \
-                 now\n\n{text}",
-                flow.title, node.title, node.instructions
+                 now\n\n{text}{}",
+                flow.title,
+                node.title,
+                node.instructions,
+                handed_conversation(node)
             );
             let spec = AgentSpec {
                 role: AgentRole::Lead,
@@ -853,8 +896,11 @@ impl Engine {
         }
         let prompt = format!(
             "This step is part of \"{}\". You worked on it before, and that work is committed on \
-             this branch.\n\n# {}\n\n{}\n\n# What the user asks now\n\n{text}",
-            flow.title, node.title, node.instructions
+             this branch.\n\n# {}\n\n{}\n\n# What the user asks now\n\n{text}{}",
+            flow.title,
+            node.title,
+            node.instructions,
+            handed_conversation(node)
         );
         let spec = AgentSpec {
             role: AgentRole::Worker,
@@ -935,7 +981,18 @@ impl Engine {
     fn adopt_plans(&mut self, agent: AgentId, planner: Planner, answer: &str) -> Adopted {
         let mut adopted = Vec::new();
         let mut rejected = false;
-        for plan in Plan::extract(answer) {
+        let plans = Plan::extract(answer);
+        // What the planner and the user have said, up to and including this reply, for the
+        // steps that inherit it. Read before the hub's lock is taken.
+        let said = if plans.is_empty() {
+            None
+        } else {
+            match self.runtime.execute(Command::GetTranscript { agent }) {
+                Ok(Reply::Transcript { events }) => conversation(&events, CONVERSATION_LIMIT),
+                _ => None,
+            }
+        };
+        for plan in plans {
             // Placing the plan may clone a repository, so it happens before the lock is taken.
             let placed = plan.map_err(|error| error.to_string()).and_then(|plan| {
                 let (project, target) = self.plan_target(planner, &plan)?;
@@ -945,7 +1002,12 @@ impl Engine {
             let built = placed.and_then(|(plan, project, target)| {
                 let state = &inner.state;
                 let mut workflow = plan
-                    .into_workflow(state.next_id(), target, |other| state.contains(other))
+                    .into_workflow(
+                        state.next_id(),
+                        target,
+                        |other| state.contains(other),
+                        said.as_deref(),
+                    )
                     .map_err(|error| error.to_string())?;
                 // The user agreed to the plan before the commander wrote it, and a lead's plan
                 // is the work it was given: set it going.
@@ -967,9 +1029,8 @@ impl Engine {
                 Err(message) => {
                     broadcast(&mut inner, &Event::PlanRejected { agent, message: message.clone() });
                     drop(inner);
-                    let text = format!(
-                        "Maestro could not use that plan: {message}. Please write the whole plan again."
-                    );
+                    let text =
+                        format!("{PLAN_REJECTED}: {message}. Please write the whole plan again.");
                     self.runtime.execute(Command::SendToAgent { agent, text }).ok();
                     rejected = true;
                 }
@@ -1176,6 +1237,38 @@ fn refused(message: impl Into<String>) -> CommandError {
 }
 
 /// Makes the worktree a node's work lives in on `branch`, with the work it builds on merged in.
+/// How much of a finished step's report the steps after it are handed, in characters.
+const REPORT_LIMIT: usize = 4_000;
+
+/// The last reply in a transcript, cut to its last [`REPORT_LIMIT`] characters, or `None` when
+/// the agent replied nothing.
+fn last_answer(events: &[AgentEvent]) -> Option<String> {
+    let answer = events.iter().rev().find_map(|event| match event {
+        AgentEvent::TurnCompleted { answer } if !answer.trim().is_empty() => Some(answer.trim()),
+        _ => None,
+    })?;
+    let length = answer.chars().count();
+    if length <= REPORT_LIMIT {
+        return Some(answer.into());
+    }
+    let end: String = answer.chars().skip(length - REPORT_LIMIT).collect();
+    Some(format!("…{end}"))
+}
+
+/// The conversation a node was planned in, as a section of its agent's first message, or
+/// nothing when it hands over its instructions alone.
+fn handed_conversation(node: &Node) -> String {
+    match &node.conversation {
+        Some(said) => format!(
+            "\n\n# The conversation this step was planned in\n\nThis is what the user and the \
+             planner said before planning this step. The instructions above say what to do; the \
+             conversation is their background, including the user's wishes in their own \
+             words.\n\n{said}"
+        ),
+        None => String::new(),
+    }
+}
+
 fn merged_worktree(
     target: &WorkflowTarget,
     branch: &str,

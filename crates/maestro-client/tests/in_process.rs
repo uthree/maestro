@@ -16,6 +16,7 @@ fn draft(title: &str) -> NodeDraft {
         tags: Vec::new(),
         delegate: false,
         origin: NodeOrigin::User,
+        conversation: None,
     }
 }
 
