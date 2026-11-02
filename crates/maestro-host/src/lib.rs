@@ -2,9 +2,10 @@
 //!
 //! A [`HostCommand`] describes a process the way the daemon thinks of it (program, arguments,
 //! working directory, environment) and [`HostCommand::process`] turns it into a
-//! [`std::process::Command`] for a [`Host`]: directly for [`Host::Local`], or wrapped in `ssh` for
-//! [`Host::Ssh`]. Nothing above this crate builds an `ssh` command line, so quoting lives in one
-//! place ([`shell`]).
+//! [`std::process::Command`] for a [`Host`]: directly for [`Host::Local`], wrapped in `ssh` for
+//! [`Host::Ssh`], in `wsl.exe` for [`Host::Wsl`] and in `docker exec` for [`Host::Docker`]. The
+//! last three hand one POSIX shell line to the machine, so they share its quoting ([`shell`]);
+//! nothing above this crate builds any of these command lines.
 //!
 //! [`git`] manages the per-worker worktrees and the commits and pushes made in them; [`github`]
 //! opens and merges pull requests through `gh`, signed in on that host, so the daemon never holds
@@ -96,6 +97,21 @@ impl HostCommand {
                 command.arg(self.remote_script());
                 command
             }
+            Host::Wsl { distribution } => {
+                let mut command = Command::new("wsl.exe");
+                if !distribution.is_empty() {
+                    command.args(["--distribution", distribution]);
+                }
+                // --exec skips the user's login shell, so `sh` reads the line exactly as written.
+                command.args(["--exec", "sh", "-c"]).arg(self.remote_script());
+                command
+            }
+            Host::Docker { container } => {
+                let mut command = Command::new("docker");
+                // -i keeps stdin open for the agent's stream; no -t, so no terminal mangles it.
+                command.args(["exec", "-i", container, "sh", "-c"]).arg(self.remote_script());
+                command
+            }
         }
     }
 
@@ -121,7 +137,7 @@ impl HostCommand {
         }
     }
 
-    /// The single shell line `ssh` hands to the remote shell.
+    /// The single shell line handed to the shell on another machine.
     fn remote_script(&self) -> String {
         let mut words = Vec::new();
         if let Some(cwd) = &self.cwd {
@@ -212,6 +228,20 @@ mod tests {
                 r"cd '/srv/my repo' && env -u CLAUDECODE A=1 claude --model 'it'\''s'",
             ]
         );
+    }
+
+    #[test]
+    fn wsl_and_docker_run_the_same_line_through_sh() {
+        let command = HostCommand::new("git").args(["status"]).cwd("/home/me/app").env("A", "1");
+        let line = "cd /home/me/app && env A=1 git status";
+        let wsl = command.process(&Host::Wsl { distribution: "Ubuntu".into() });
+        assert_eq!(wsl.get_program(), "wsl.exe");
+        assert_eq!(args(&wsl), ["--distribution", "Ubuntu", "--exec", "sh", "-c", line]);
+        let default = command.process(&Host::Wsl { distribution: String::new() });
+        assert_eq!(args(&default), ["--exec", "sh", "-c", line]);
+        let docker = command.process(&Host::Docker { container: "dev".into() });
+        assert_eq!(docker.get_program(), "docker");
+        assert_eq!(args(&docker), ["exec", "-i", "dev", "sh", "-c", line]);
     }
 
     #[test]

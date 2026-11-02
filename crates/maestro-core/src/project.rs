@@ -1,7 +1,8 @@
 //! Projects: what one commander may work with.
 //!
 //! A project is the user's name for a body of work, like a project in ChatGPT's desktop app. It
-//! holds [`Resource`]s: GitHub repositories, folders on a machine, SSH machines, and the AI
+//! holds [`Resource`]s: GitHub repositories, folders on a machine, machines (over SSH, a WSL
+//! distribution, a Docker container), and the AI
 //! providers its workers may run on. Each project has one commander, which is told the resources
 //! at the start of its conversation and whenever they change ([`Project::briefing`]), and decides
 //! which to use for each plan, asking the user when the choice is unclear. A plan names its
@@ -19,7 +20,7 @@ use crate::target::Host;
 
 /// Something a project's work may use.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", from = "ResourceRepr")]
 pub enum Resource {
     /// A repository on GitHub, cloned onto the machine a plan runs on the first time it is used.
     GitHub {
@@ -37,10 +38,11 @@ pub enum Resource {
         /// The branch work starts from and pull requests merge into.
         base: String,
     },
-    /// A machine reached with the system `ssh`, where GitHub repositories can be cloned and run.
+    /// A machine other than the daemon's, where GitHub repositories can be cloned and run: one
+    /// reached with the system `ssh`, a WSL distribution or a Docker container.
     Machine {
-        /// Anything `ssh` accepts as a destination.
-        destination: String,
+        /// The machine; never [`Host::Local`], which every project has.
+        host: Host,
     },
     /// An AI provider the project's workers may run on. A project with none may use any.
     Provider {
@@ -79,18 +81,36 @@ impl Resource {
                 "GitHub repository {repository} (base branch {base}), cloned onto the machine the plan runs on"
             ),
             Self::Directory { host, path, base } => {
-                format!("folder {} on {} (base branch {base})", path.display(), describe(host))
+                format!("folder {} on {} (base branch {base})", path.display(), host.describe())
             }
-            Self::Machine { destination } => format!("SSH machine {destination}"),
+            Self::Machine { host } => host.describe(),
             Self::Provider { provider } => format!("AI provider {}", provider.label()),
         }
     }
 }
 
-fn describe(host: &Host) -> String {
-    match host {
-        Host::Local => "the daemon's machine".into(),
-        Host::Ssh { destination } => format!("SSH machine {destination}"),
+/// How a [`Resource`] is read. A machine saved before WSL and Docker were added is
+/// `{"kind": "machine", "destination": …}`, an SSH machine.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum ResourceRepr {
+    GitHub { repository: String, base: String },
+    Directory { host: Host, path: PathBuf, base: String },
+    Machine { host: Option<Host>, destination: Option<String> },
+    Provider { provider: ProviderKind },
+}
+
+impl From<ResourceRepr> for Resource {
+    fn from(repr: ResourceRepr) -> Self {
+        match repr {
+            ResourceRepr::GitHub { repository, base } => Self::GitHub { repository, base },
+            ResourceRepr::Directory { host, path, base } => Self::Directory { host, path, base },
+            ResourceRepr::Machine { host, destination } => Self::Machine {
+                host: host
+                    .unwrap_or_else(|| Host::Ssh { destination: destination.unwrap_or_default() }),
+            },
+            ResourceRepr::Provider { provider } => Self::Provider { provider },
+        }
     }
 }
 
@@ -192,12 +212,12 @@ impl Project {
                 }
                 Resource::Directory { host: machine(host)?, path, base: branch(base) }
             }
-            Resource::Machine { destination } => {
-                let Host::Ssh { destination } = machine(Host::Ssh { destination })? else {
-                    return Err(ProjectError::Invalid("a machine needs an SSH destination"));
-                };
-                Resource::Machine { destination }
+            Resource::Machine { host: Host::Local } => {
+                return Err(ProjectError::Invalid(
+                    "the daemon's machine is always there; a machine is another one",
+                ));
             }
+            Resource::Machine { host } => Resource::Machine { host: machine(host)? },
             provider @ Resource::Provider { .. } => provider,
         };
         if self.resources.iter().any(|entry| same(&entry.resource, &resource)) {
@@ -262,9 +282,7 @@ impl Project {
         let host = match machine {
             None => None,
             Some(id) => match self.resource(id) {
-                Some(Resource::Machine { destination }) => {
-                    Some(Host::Ssh { destination: destination.clone() })
-                }
+                Some(Resource::Machine { host }) => Some(host.clone()),
                 Some(_) => return Err(ProjectError::WrongKind { id, wanted: "a machine" }),
                 None => return Err(ProjectError::Unknown(id.to_string())),
             },
@@ -333,20 +351,35 @@ fn branch(base: String) -> String {
     if base.is_empty() { "main".into() } else { base.into() }
 }
 
-/// `host` with a trimmed destination, refusing a blank one.
+/// `host` with its name trimmed, refusing a blank or spaced one.
 fn machine(host: Host) -> Result<Host, ProjectError> {
-    match host {
-        Host::Local => Ok(Host::Local),
-        Host::Ssh { destination } => {
-            let destination = destination.trim();
-            if destination.is_empty() || destination.contains(char::is_whitespace) {
-                return Err(ProjectError::Invalid(
-                    "an SSH destination is one word, like user@host",
-                ));
-            }
-            Ok(Host::Ssh { destination: destination.into() })
+    let word = |name: String, blank_ok: bool, problem: &'static str| {
+        let name = name.trim();
+        if (name.is_empty() && !blank_ok) || name.contains(char::is_whitespace) {
+            return Err(ProjectError::Invalid(problem));
         }
-    }
+        Ok(name.to_owned())
+    };
+    Ok(match host {
+        Host::Local => Host::Local,
+        Host::Ssh { destination } => Host::Ssh {
+            destination: word(
+                destination,
+                false,
+                "an SSH destination is one word, like user@host",
+            )?,
+        },
+        Host::Wsl { distribution } => Host::Wsl {
+            distribution: word(
+                distribution,
+                true,
+                "a WSL distribution is one word, like Ubuntu, or blank for the default",
+            )?,
+        },
+        Host::Docker { container } => Host::Docker {
+            container: word(container, false, "a Docker container is named by one word or its id")?,
+        },
+    })
 }
 
 /// Whether two resources are the same thing, whatever their branches.
@@ -399,7 +432,7 @@ mod tests {
         assert_eq!(first, ResourceId(1));
         assert!(matches!(project.add(folder("/src/app")), Err(ProjectError::Duplicate(_))));
         assert!(project.add(folder("")).is_err());
-        assert!(project.add(Resource::Machine { destination: "a b".into() }).is_err());
+        assert!(project.add(Resource::Machine { host: ssh("a b") }).is_err());
         let github = Resource::GitHub { repository: "Uthree/Maestro".into(), base: "dev".into() };
         project.add(github).unwrap();
         let again = Resource::GitHub { repository: "uthree/maestro".into(), base: "main".into() };
@@ -441,7 +474,7 @@ mod tests {
 
         let github =
             project.add(Resource::GitHub { repository: "o/r".into(), base: "dev".into() }).unwrap();
-        let machine = project.add(Resource::Machine { destination: "gpu".into() }).unwrap();
+        let machine = project.add(Resource::Machine { host: ssh("gpu") }).unwrap();
         assert_eq!(project.place(None, None), Err(ProjectError::Ambiguous));
         let cloned = project.place(Some(github), Some(machine)).unwrap().unwrap();
         assert_eq!(cloned.host, ssh("gpu"));
@@ -460,7 +493,7 @@ mod tests {
     fn the_briefing_lists_resources_by_id() {
         let mut project = Project::new(ProjectId(1), "Site");
         project.add(Resource::GitHub { repository: "o/r".into(), base: "main".into() }).unwrap();
-        project.add(Resource::Machine { destination: "gpu".into() }).unwrap();
+        project.add(Resource::Machine { host: ssh("gpu") }).unwrap();
         project.add(Resource::Provider { provider: ProviderKind::Codex }).unwrap();
         assert_eq!(
             project.briefing(),
@@ -470,5 +503,40 @@ mod tests {
              Workers may run only on: Codex.\n\
              </maestro-project>"
         );
+    }
+
+    #[test]
+    fn wsl_and_docker_are_machines_too() {
+        let mut project = Project::new(ProjectId(1), "p");
+        let github = project
+            .add(Resource::GitHub { repository: "o/r".into(), base: "main".into() })
+            .unwrap();
+        let wsl = project
+            .add(Resource::Machine { host: Host::Wsl { distribution: " Ubuntu ".into() } })
+            .unwrap();
+        let docker = project
+            .add(Resource::Machine { host: Host::Docker { container: "dev".into() } })
+            .unwrap();
+        let placed = project.place(Some(github), Some(wsl)).unwrap().unwrap();
+        assert_eq!(placed.host, Host::Wsl { distribution: "Ubuntu".into() });
+        let placed = project.place(Some(github), Some(docker)).unwrap().unwrap();
+        assert_eq!(placed.host, Host::Docker { container: "dev".into() });
+        // The default distribution is a blank name; a container needs one.
+        project.add(Resource::Machine { host: Host::Wsl { distribution: "".into() } }).unwrap();
+        let unnamed = Resource::Machine { host: Host::Docker { container: " ".into() } };
+        assert!(project.add(unnamed).is_err());
+        assert!(project.add(Resource::Machine { host: Host::Local }).is_err());
+        assert!(project.briefing().contains("- r3: Docker container dev\n"));
+    }
+
+    #[test]
+    fn a_machine_saved_before_wsl_and_docker_reads_as_ssh() {
+        let old: Resource =
+            serde_json::from_str(r#"{"kind":"machine","destination":"gpu"}"#).unwrap();
+        assert_eq!(old, Resource::Machine { host: ssh("gpu") });
+        let docker = Resource::Machine { host: Host::Docker { container: "dev".into() } };
+        let text = serde_json::to_string(&docker).unwrap();
+        assert_eq!(text, r#"{"kind":"machine","host":{"kind":"docker","container":"dev"}}"#);
+        assert_eq!(serde_json::from_str::<Resource>(&text).unwrap(), docker);
     }
 }

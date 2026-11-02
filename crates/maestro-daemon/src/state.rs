@@ -407,7 +407,7 @@ mod tests {
         // A refused edit changes nothing.
         let again = state.apply(Command::AddResource { project, resource: folder });
         assert!(again.0.is_err() && again.1.is_empty());
-        let machine = Resource::Machine { destination: "gpu".into() };
+        let machine = Resource::Machine { host: Host::Ssh { destination: "gpu".into() } };
         let added = state.apply(Command::AddResource { project, resource: machine }).0;
         assert_eq!(added, Ok(Reply::ResourceAdded { resource: maestro_core::ResourceId(2) }));
 
