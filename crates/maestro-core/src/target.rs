@@ -20,6 +20,34 @@ pub enum Host {
         /// Anything `ssh` accepts as a destination: `user@host`, or a `Host` alias from config.
         destination: String,
     },
+    /// A WSL distribution on the daemon's machine, which must be Windows. Commands run in it
+    /// with `wsl.exe`, so paths are the distribution's own (`/home/me/app`, not `C:\…`).
+    Wsl {
+        /// The distribution's name, as `wsl --list` shows it; blank for the default one.
+        #[serde(default)]
+        distribution: String,
+    },
+    /// A running Docker container on the daemon's machine, entered with `docker exec`. Paths are
+    /// inside the container, and the container must have `sh`, `git` and the agent CLIs.
+    Docker {
+        /// The container's name or id.
+        container: String,
+    },
+}
+
+impl Host {
+    /// How the commander and logs name it, in English.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Local => "the daemon's machine".into(),
+            Self::Ssh { destination } => format!("SSH machine {destination}"),
+            Self::Wsl { distribution } if distribution.is_empty() => {
+                "the default WSL distribution".into()
+            }
+            Self::Wsl { distribution } => format!("WSL distribution {distribution}"),
+            Self::Docker { container } => format!("Docker container {container}"),
+        }
+    }
 }
 
 /// A git worktree created for one worker, so parallel workers never share a checkout.

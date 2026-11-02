@@ -4,7 +4,7 @@
 //! that rename and delete one.
 
 use atelier::{
-    ActiveTheme, Button, ButtonVariant, ControlSize, FormField, FormGroup, IconName, Label,
+    ActiveTheme, Button, ButtonVariant, ControlSize, FormField, FormGroup, Icon, IconName, Label,
     ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Switch, TextColor,
     TextField, TextSize, menu_separator,
 };
@@ -25,7 +25,48 @@ pub fn host_label(host: &Host) -> String {
     match host {
         Host::Local => tr("The daemon's machine", "デーモンのマシン").into(),
         Host::Ssh { destination } => destination.clone(),
+        Host::Wsl { distribution } if distribution.is_empty() => {
+            tr("WSL (default)", "WSL（既定）").into()
+        }
+        Host::Wsl { distribution } => trf!("WSL {distribution}", "WSL {distribution}"),
+        Host::Docker { container } => trf!("Docker {container}", "Docker {container}"),
     }
+}
+
+/// What kind of machine a host is, as the line under its name says.
+fn host_kind(host: &Host) -> &'static str {
+    match host {
+        Host::Local => tr("The daemon's machine", "デーモンのマシン"),
+        Host::Ssh { .. } => tr("SSH machine", "SSH 接続先"),
+        Host::Wsl { .. } => tr("WSL distribution", "WSL ディストリビューション"),
+        Host::Docker { .. } => tr("Docker container", "Docker コンテナ"),
+    }
+}
+
+/// Whether Maestro has not yet been tried on this kind of machine: WSL and Docker are new and
+/// have only been checked by unit tests, so the pane says they may well have bugs.
+pub fn is_untested(host: &Host) -> bool {
+    matches!(host, Host::Wsl { .. } | Host::Docker { .. })
+}
+
+/// The warning shown beside a WSL or Docker machine.
+fn untested_notice(cx: &Context<Maestro>) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_start()
+        .gap(theme.spacing.xs)
+        .child(Icon::new(IconName::Alert).size(px(14.)).color(theme.colors.warning))
+        .child(
+            Label::new(tr(
+                "Experimental: WSL and Docker have not been tried on a real machine yet, so they \
+                 are likely to have bugs.",
+                "実験的機能: WSL と Docker はまだ実機で検証していないため、バグが残っている可能性が\
+                 高いです。",
+            ))
+            .size(TextSize::XSmall)
+            .color(TextColor::Warning),
+        )
 }
 
 /// A resource as a list row names it: its label and a line under it.
@@ -34,13 +75,23 @@ pub fn resource_label(resource: &Resource) -> (String, String) {
         Resource::GitHub { repository, base } => {
             (repository.clone(), trf!("GitHub, from {base}", "GitHub・{base} から"))
         }
+        Resource::Directory { host, path, base } if is_untested(host) => (
+            path.display().to_string(),
+            trf!(
+                "On {}, from {base} (experimental, untested)",
+                "{}・{base} から（実験的・未検証）",
+                host_label(host)
+            ),
+        ),
         Resource::Directory { host, path, base } => (
             path.display().to_string(),
             trf!("On {}, from {base}", "{}・{base} から", host_label(host)),
         ),
-        Resource::Machine { destination } => {
-            (destination.clone(), tr("SSH machine", "SSH 接続先").into())
-        }
+        Resource::Machine { host } if is_untested(host) => (
+            host_label(host),
+            trf!("{} (experimental, untested)", "{}（実験的・未検証）", host_kind(host)),
+        ),
+        Resource::Machine { host } => (host_label(host), host_kind(host).into()),
         Resource::Provider { provider } => (provider.label().into(), String::new()),
     }
 }
@@ -121,7 +172,9 @@ impl Maestro {
         let kinds = [
             Segment::label("GitHub"),
             Segment::label(tr("Folder", "フォルダ")),
-            Segment::label(tr("SSH machine", "SSH 接続先")),
+            Segment::label("SSH"),
+            Segment::label("WSL"),
+            Segment::label("Docker"),
         ];
         let (what, hint) = match self.resource_kind {
             0 => (
@@ -138,11 +191,29 @@ impl Maestro {
                     "そのマシン上の git チェックアウト。コマンダーは最初のフォルダを読んで計画します。",
                 ),
             ),
-            _ => (
+            2 => (
                 tr("Destination", "接続先"),
                 tr(
                     "Anything ssh accepts: user@host, or a Host from your ssh config.",
                     "ssh に渡せる接続先（user@host や ssh config の Host 名）。",
+                ),
+            ),
+            3 => (
+                tr("Distribution", "ディストリビューション"),
+                tr(
+                    "A WSL distribution on the daemon's machine, as wsl --list shows it. Leave it \
+                     blank for the default one. Paths in it are Linux paths.",
+                    "デーモンのマシン（Windows）にある WSL ディストリビューション名（wsl --list の\
+                     表示どおり）。空欄なら既定のもの。パスは Linux のパスです。",
+                ),
+            ),
+            _ => (
+                tr("Container", "コンテナ"),
+                tr(
+                    "A running container on the daemon's machine, by name or id. It needs sh, git \
+                     and the agent CLIs; paths are inside it.",
+                    "デーモンのマシンで動いているコンテナの名前か ID。sh・git・エージェント CLI が\
+                     必要で、パスはコンテナ内のものです。",
                 ),
             ),
         };
@@ -157,7 +228,9 @@ impl Maestro {
                         let placeholder = match index {
                             0 => "owner/name",
                             1 => "/path/to/repository",
-                            _ => "user@host",
+                            2 => "user@host",
+                            3 => "Ubuntu",
+                            _ => "container",
                         };
                         this.fields
                             .resource
@@ -210,6 +283,7 @@ impl Maestro {
                         )
                     }),
             )
+            .when(self.resource_kind >= 3, |group| group.child(untested_notice(cx)))
             .when(self.resource_kind < 2, |group| {
                 group.child(
                     FormField::new(tr("Base branch", "ベースブランチ"))

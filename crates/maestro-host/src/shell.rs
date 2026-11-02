@@ -1,4 +1,4 @@
-//! Quoting for the POSIX shell `ssh` runs a remote command in.
+//! Quoting for the POSIX shell a command on another machine (SSH, WSL, Docker) runs in.
 
 /// Quotes a word so the shell passes it through unchanged. Plain words are left alone, so a
 /// logged command line stays readable.

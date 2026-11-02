@@ -125,7 +125,8 @@ pub struct Fields {
     pub instructions: Entity<InputState>,
     /// The open project's name.
     pub project_name: Entity<InputState>,
-    /// A resource to add: a GitHub repository, a folder's path, or an SSH destination.
+    /// A resource to add: a GitHub repository, a folder's path, an SSH destination, a WSL
+    /// distribution or a Docker container.
     pub resource: Entity<InputState>,
     /// The base branch of a repository or folder to add.
     pub resource_base: Entity<InputState>,
@@ -748,7 +749,8 @@ impl Maestro {
         let Some(project) = self.project else { return };
         let text = input::text(&self.fields.resource, cx).trim().to_owned();
         let base = input::text(&self.fields.resource_base, cx).trim().to_owned();
-        if text.is_empty() {
+        // A blank WSL distribution is the default one; everything else needs a name.
+        if text.is_empty() && self.resource_kind != 3 {
             return;
         }
         let resource = match self.resource_kind {
@@ -769,7 +771,9 @@ impl Maestro {
                 path: PathBuf::from(text),
                 base,
             },
-            _ => Resource::Machine { destination: text },
+            2 => Resource::Machine { host: Host::Ssh { destination: text } },
+            3 => Resource::Machine { host: Host::Wsl { distribution: text } },
+            _ => Resource::Machine { host: Host::Docker { container: text } },
         };
         input::clear(&self.fields.resource, window, cx);
         self.command(Command::AddResource { project, resource }, cx);
@@ -815,13 +819,13 @@ impl Maestro {
         .detach();
     }
 
-    /// The machines a folder can be on: the daemon's, then the open project's SSH machines.
+    /// The machines a folder can be on: the daemon's, then the open project's other machines.
     pub(crate) fn resource_hosts(&self) -> Vec<Host> {
         let mut hosts = vec![Host::Local];
         if let Some(project) = self.open_project() {
             for entry in &project.resources {
-                if let Resource::Machine { destination } = &entry.resource {
-                    hosts.push(Host::Ssh { destination: destination.clone() });
+                if let Resource::Machine { host } = &entry.resource {
+                    hosts.push(host.clone());
                 }
             }
         }

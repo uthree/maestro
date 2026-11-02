@@ -975,9 +975,7 @@ impl Maestro {
                 .resources
                 .iter()
                 .filter_map(|entry| match &entry.resource {
-                    maestro_core::Resource::Machine { destination } => {
-                        Some((entry.id, destination.clone()))
-                    }
+                    maestro_core::Resource::Machine { host } => Some((entry.id, host_label(host))),
                     _ => None,
                 })
                 .collect();
