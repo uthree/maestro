@@ -157,7 +157,7 @@ impl Accent {
 
 /// Read TeX math. Never fails; see the module notes.
 pub fn parse(source: &str) -> Math {
-    let mut reader = Reader { chars: source.chars().peekable() };
+    let mut reader = Reader { chars: source.chars().peekable(), depth: 0 };
     let rows = reader.table(Stop::End);
     // `&` and `\\` outside an environment: read the whole formula as aligned lines.
     if rows.len() > 1 || rows.first().is_some_and(|row| row.len() > 1) {
@@ -178,6 +178,11 @@ fn simplify(math: Math) -> Math {
         other => other,
     }
 }
+
+/// How many groups deep a formula is read. Past it a group comes back as the text it is
+/// written as, rather than being read: no formula a person writes nests nearly this far, and
+/// one that does must not overflow the stack.
+const MAX_DEPTH: usize = 64;
 
 /// What ends the row being read.
 #[derive(Clone, Copy, PartialEq)]
@@ -215,6 +220,9 @@ enum Token {
 
 struct Reader<'a> {
     chars: Peekable<Chars<'a>>,
+    /// How many groups deep the reader is. Reading is recursive, and the TeX comes from an
+    /// agent's answer or the user's own message, neither of which is trusted to be shallow.
+    depth: usize,
 }
 
 impl Reader<'_> {
@@ -434,7 +442,22 @@ impl Reader<'_> {
     }
 
     /// One piece, without its scripts. `None` only at the end of the source.
+    ///
+    /// Every way of nesting — a group, a command's argument, `\left`, an environment — reads
+    /// its content through here, so counting depth here bounds the whole reader's recursion.
     fn atom(&mut self) -> Option<Math> {
+        if self.depth >= MAX_DEPTH {
+            // Too deep to read: take the group as written and leave it as text.
+            let raw = self.raw_group();
+            return (!raw.is_empty()).then_some(Math::Text(raw));
+        }
+        self.depth += 1;
+        let atom = self.read_atom();
+        self.depth -= 1;
+        atom
+    }
+
+    fn read_atom(&mut self) -> Option<Math> {
         let token = self.token()?;
         Some(match token {
             Token::Char('{') => simplify(self.row(Stop::Brace).0),
@@ -1253,6 +1276,29 @@ mod tests {
         assert_eq!(flat("}x{"), "x");
         assert_eq!(flat(r"x^"), "x");
         assert_eq!(flat(""), "");
+    }
+
+    /// Reading is recursive, so a formula nested deeper than the stack can take used to abort
+    /// the process rather than panic. Past [`MAX_DEPTH`] a group is left as the text it is
+    /// written as, and however deep the nesting goes the formula still comes back.
+    #[test]
+    fn nesting_deeper_than_the_limit_is_left_as_text() {
+        // Shallow nesting is still read, not left as text.
+        assert_eq!(
+            flat(&format!("{}x{}", "{".repeat(MAX_DEPTH - 1), "}".repeat(MAX_DEPTH - 1))),
+            "x"
+        );
+        for deep in [
+            format!("{}x{}", "{".repeat(100_000), "}".repeat(100_000)),
+            format!("{}1{}", r"\frac{".repeat(100_000), "}{2}".repeat(100_000)),
+            format!("{}x{}", r"\left(".repeat(100_000), r"\right)".repeat(100_000)),
+            format!("{}x{}", r"\begin{matrix}".repeat(100_000), r"\end{matrix}".repeat(100_000)),
+            format!("{}x{}", r"\sqrt[".repeat(100_000), "]".repeat(100_000)),
+        ] {
+            let math = parse(&deep);
+            assert!(!math.to_unicode().is_empty());
+            assert!(math.height() > 0.);
+        }
     }
 
     impl Math {

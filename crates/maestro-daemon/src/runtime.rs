@@ -376,8 +376,7 @@ fn remember(transcript: &mut Vec<AgentEvent>, event: &AgentEvent) {
 /// Creates the workspace's worktree unless it is already registered.
 pub(crate) fn prepare_worktree(workspace: &Workspace) -> Result<(), HostError> {
     let Some(worktree) = &workspace.worktree else { return Ok(()) };
-    let existing = git::list_worktrees(&workspace.host, &workspace.repository)?;
-    if existing.iter().any(|entry| entry.path == worktree.path) {
+    if git::is_registered(&workspace.host, &workspace.repository, &worktree.path)? {
         return Ok(());
     }
     git::add_worktree(&workspace.host, &workspace.repository, worktree)
