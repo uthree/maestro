@@ -30,6 +30,32 @@ pub fn add_worktree(host: &Host, repository: &Path, worktree: &Worktree) -> Resu
     command.run(host).map(drop)
 }
 
+/// Whether `path` is already a worktree of `repository`.
+///
+/// `git worktree list` prints the directory with every symlink resolved, so a path that reaches
+/// the same directory through one — `/var/…` for `/private/var/…` on macOS, or a checkout kept
+/// under a symlinked home — never matches it as written. Asking git to resolve the directory too
+/// puts both sides in its own terms, and does so on whichever host the repository lives on.
+pub fn is_registered(host: &Host, repository: &Path, path: &Path) -> Result<bool, HostError> {
+    let listed = list_worktrees(host, repository)?;
+    if listed.iter().any(|entry| entry.path == path) {
+        return Ok(true);
+    }
+    let Some(resolved) = resolve(host, path) else { return Ok(false) };
+    Ok(listed.iter().any(|entry| entry.path == resolved))
+}
+
+/// The worktree `path` is the root of, as git spells it. `None` when `path` is not in a worktree,
+/// or is a directory inside one rather than its root.
+fn resolve(host: &Host, path: &Path) -> Option<PathBuf> {
+    let text = git(path).args(["rev-parse", "--show-toplevel", "--show-prefix"]).run(host).ok()?;
+    let mut lines = text.lines();
+    let root = lines.next()?.trim();
+    // A prefix means `path` sits somewhere inside a worktree, so it is not that worktree.
+    let inside = lines.next().is_some_and(|prefix| !prefix.trim().is_empty());
+    (!root.is_empty() && !inside).then(|| PathBuf::from(root))
+}
+
 /// Removes a worktree's directory and its registration. `force` discards uncommitted changes.
 pub fn remove_worktree(
     host: &Host,
@@ -170,6 +196,29 @@ mod tests {
         assert!(merge(&Host::Local, repo.path(), "side").is_err());
         assert_eq!(std::fs::read_to_string(repo.path().join("f")).unwrap(), "main");
         assert!(run(&["status", "--porcelain"]).unwrap().is_empty());
+    }
+
+    /// Preparing a worktree asks this before adding one, so a path reached through a symlink has
+    /// to be recognised: otherwise the second preparation adds it again and git refuses.
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_is_recognised_through_a_symlink() {
+        let repo = repository();
+        let trees = tempfile::tempdir().unwrap();
+        let real = trees.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = trees.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let worktree =
+            Worktree { branch: "maestro/n1".into(), base: "main".into(), path: link.join("n1") };
+        assert!(!is_registered(&Host::Local, repo.path(), &worktree.path).unwrap());
+        add_worktree(&Host::Local, repo.path(), &worktree).unwrap();
+        assert!(is_registered(&Host::Local, repo.path(), &worktree.path).unwrap());
+        assert!(!is_registered(&Host::Local, repo.path(), &link.join("n2")).unwrap());
+        // A directory inside a worktree is not that worktree.
+        std::fs::create_dir(worktree.path.join("inner")).unwrap();
+        assert!(!is_registered(&Host::Local, repo.path(), &worktree.path.join("inner")).unwrap());
     }
 
     #[test]

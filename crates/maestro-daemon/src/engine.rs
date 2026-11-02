@@ -1236,7 +1236,6 @@ fn refused(message: impl Into<String>) -> CommandError {
     CommandError::Workflow { message: message.into() }
 }
 
-/// Makes the worktree a node's work lives in on `branch`, with the work it builds on merged in.
 /// How much of a finished step's report the steps after it are handed, in characters.
 const REPORT_LIMIT: usize = 4_000;
 
@@ -1269,6 +1268,7 @@ fn handed_conversation(node: &Node) -> String {
     }
 }
 
+/// Makes the worktree a node's work lives in on `branch`, with the work it builds on merged in.
 fn merged_worktree(
     target: &WorkflowTarget,
     branch: &str,
