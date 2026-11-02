@@ -4,7 +4,7 @@
 //! that rename and delete one.
 
 use atelier::{
-    ActiveTheme, Button, ButtonVariant, ControlSize, FormField, FormGroup, IconName, Label,
+    ActiveTheme, Button, ButtonVariant, ControlSize, FormField, FormGroup, Icon, IconName, Label,
     ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Switch, TextColor,
     TextField, TextSize, menu_separator,
 };
@@ -43,15 +43,53 @@ fn host_kind(host: &Host) -> &'static str {
     }
 }
 
+/// Whether Maestro has not yet been tried on this kind of machine: WSL and Docker are new and
+/// have only been checked by unit tests, so the pane says they may well have bugs.
+pub fn is_untested(host: &Host) -> bool {
+    matches!(host, Host::Wsl { .. } | Host::Docker { .. })
+}
+
+/// The warning shown beside a WSL or Docker machine.
+fn untested_notice(cx: &Context<Maestro>) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_start()
+        .gap(theme.spacing.xs)
+        .child(Icon::new(IconName::Alert).size(px(14.)).color(theme.colors.warning))
+        .child(
+            Label::new(tr(
+                "Experimental: WSL and Docker have not been tried on a real machine yet, so they \
+                 are likely to have bugs.",
+                "実験的機能: WSL と Docker はまだ実機で検証していないため、バグが残っている可能性が\
+                 高いです。",
+            ))
+            .size(TextSize::XSmall)
+            .color(TextColor::Warning),
+        )
+}
+
 /// A resource as a list row names it: its label and a line under it.
 pub fn resource_label(resource: &Resource) -> (String, String) {
     match resource {
         Resource::GitHub { repository, base } => {
             (repository.clone(), trf!("GitHub, from {base}", "GitHub・{base} から"))
         }
+        Resource::Directory { host, path, base } if is_untested(host) => (
+            path.display().to_string(),
+            trf!(
+                "On {}, from {base} (experimental, untested)",
+                "{}・{base} から（実験的・未検証）",
+                host_label(host)
+            ),
+        ),
         Resource::Directory { host, path, base } => (
             path.display().to_string(),
             trf!("On {}, from {base}", "{}・{base} から", host_label(host)),
+        ),
+        Resource::Machine { host } if is_untested(host) => (
+            host_label(host),
+            trf!("{} (experimental, untested)", "{}（実験的・未検証）", host_kind(host)),
         ),
         Resource::Machine { host } => (host_label(host), host_kind(host).into()),
         Resource::Provider { provider } => (provider.label().into(), String::new()),
@@ -245,6 +283,7 @@ impl Maestro {
                         )
                     }),
             )
+            .when(self.resource_kind >= 3, |group| group.child(untested_notice(cx)))
             .when(self.resource_kind < 2, |group| {
                 group.child(
                     FormField::new(tr("Base branch", "ベースブランチ"))
