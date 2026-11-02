@@ -233,6 +233,7 @@ pub fn parse(source: &str) -> Document {
         strikethrough: 0,
         links: Vec::new(),
         task: None,
+        depth: 0,
     };
     Document { blocks: reader.blocks() }
 }
@@ -317,7 +318,16 @@ struct Reader<'a> {
     links: Vec<String>,
     /// The tick of the task list item being read.
     task: Option<bool>,
+    /// How many containers deep the reader is. Reading blocks is recursive, and the Markdown
+    /// comes from an agent's answer or the user's own message, neither of which is trusted to
+    /// be shallow.
+    depth: usize,
 }
+
+/// How many containers deep blocks are read. Past it a container's content is dropped rather
+/// than read: nothing a person writes nests nearly this far, and something that does must not
+/// overflow the stack.
+const MAX_DEPTH: usize = 48;
 
 /// A piece of a paragraph: text, or display maths that breaks it.
 enum Piece {
@@ -356,6 +366,34 @@ fn is_inline(event: &Event<'_>) -> bool {
 impl Reader<'_> {
     /// Blocks up to the end of the container being read, whose end it consumes.
     fn blocks(&mut self) -> Vec<Block> {
+        if self.depth >= MAX_DEPTH {
+            self.skip();
+            return Vec::new();
+        }
+        self.depth += 1;
+        let blocks = self.read_blocks();
+        self.depth -= 1;
+        blocks
+    }
+
+    /// Consumes the events up to the end of the container being read, keeping none of them.
+    fn skip(&mut self) {
+        let mut depth = 1usize;
+        for event in self.events.by_ref() {
+            match event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn read_blocks(&mut self) -> Vec<Block> {
         let mut blocks = Vec::new();
         while let Some(event) = self.events.peek() {
             if is_inline(event) {
@@ -710,6 +748,24 @@ mod tests {
         let document = parse("```rust\nfn ma");
         let Block::Code(code) = &document.blocks[0] else { panic!() };
         assert_eq!(code.code, "fn ma");
+    }
+
+    /// Reading blocks is recursive, so Markdown nested deeper than the stack can take used to
+    /// abort the process rather than panic. Past [`MAX_DEPTH`] a container's content is
+    /// dropped, and however deep the nesting goes the document still comes back.
+    #[test]
+    fn nesting_deeper_than_the_limit_is_dropped() {
+        // Shallow nesting is still read, down to the innermost paragraph.
+        let quoted = parse(&format!("{}deep\n", "> ".repeat(MAX_DEPTH - 1)));
+        assert_eq!(quoted.plain(), "deep");
+
+        for deep in [
+            format!("{}deep\n", "> ".repeat(100_000)),
+            (0..5_000).map(|i| format!("{}- x\n", "  ".repeat(i))).collect(),
+            format!("${}x{}$", "{".repeat(100_000), "}".repeat(100_000)),
+        ] {
+            let _ = parse(&deep).plain();
+        }
     }
 
     #[test]
