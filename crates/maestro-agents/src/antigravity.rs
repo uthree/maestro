@@ -17,6 +17,12 @@ use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, with_instructions};
 /// What a refused step reports, and what `agy` is told.
 const REFUSED: &str = "The user refused this action.";
 
+/// The tools that define, start or drive a sub-agent. Rules for them would have to reach `agy`
+/// through `--settings`, which Maestro does not write yet, so a worker that may not use them is
+/// noticed when it does.
+pub(crate) const SUBAGENT_TOOLS: [&str; 4] =
+    ["invoke_subagent", "define_subagent", "manage_subagents", "browser_subagent"];
+
 pub(crate) struct Antigravity {
     config: WorkerConfig,
     first: bool,

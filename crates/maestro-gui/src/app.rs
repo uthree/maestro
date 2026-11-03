@@ -959,6 +959,7 @@ impl Maestro {
             difficulty: Some(Difficulty::Moderate),
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: NodeOrigin::User,
             conversation: None,
         };

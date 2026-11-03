@@ -349,6 +349,7 @@ mod tests {
             difficulty: None,
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: NodeOrigin::User,
             conversation: None,
         }

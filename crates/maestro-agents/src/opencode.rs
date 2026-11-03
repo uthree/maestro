@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 use crate::rpc::{self, Calls};
 use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text, with_instructions};
 
+/// The tool that starts a sub-agent, which the `task` permission governs.
+pub(crate) const SUBAGENT_TOOLS: [&str; 1] = ["task"];
+
 enum Purpose {
     Initialize,
     NewSession,
@@ -195,11 +198,19 @@ impl Adapter for OpenCode {
             .arg("acp")
             .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
             .env("OPENCODE_AUTO_SHARE", "false");
+        let mut permission = serde_json::Map::new();
         if self.config.read_only {
             // Edits are refused outright, and commands must ask so the daemon can refuse them.
-            command.env("OPENCODE_PERMISSION", r#"{"edit":"deny","bash":"ask"}"#)
-        } else {
+            permission.insert("edit".into(), "deny".into());
+            permission.insert("bash".into(), "ask".into());
+        }
+        if !self.config.subagents {
+            permission.insert("task".into(), "deny".into());
+        }
+        if permission.is_empty() {
             command
+        } else {
+            command.env("OPENCODE_PERMISSION", Value::Object(permission).to_string())
         }
     }
 
@@ -269,6 +280,24 @@ mod tests {
     use super::*;
     use crate::config;
     use maestro_core::ProviderKind;
+
+    #[test]
+    fn permissions_refuse_edits_and_sub_agents_as_configured() {
+        let permission = |read_only, subagents| {
+            let config = WorkerConfig { read_only, subagents, ..config(ProviderKind::OpenCode) };
+            let command = OpenCode::new(config).command();
+            command
+                .env
+                .get("OPENCODE_PERMISSION")
+                .map(|text| serde_json::from_str::<Value>(text).unwrap())
+        };
+        assert_eq!(permission(false, true), None);
+        assert_eq!(permission(false, false), Some(json!({"task": "deny"})));
+        assert_eq!(
+            permission(true, false),
+            Some(json!({"edit": "deny", "bash": "ask", "task": "deny"}))
+        );
+    }
 
     #[test]
     fn handshake_selects_the_model_before_the_first_prompt() {

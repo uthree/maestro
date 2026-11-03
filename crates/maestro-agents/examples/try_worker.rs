@@ -35,6 +35,7 @@ fn main() {
         instructions: "Answer briefly.".into(),
         program: None,
         read_only: true,
+        subagents: true,
     };
     let (events, received) = mpsc::channel();
     let session = AgentSession::spawn(&Host::Local, adapter(config), prompt, move |event| {

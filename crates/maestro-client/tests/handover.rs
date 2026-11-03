@@ -22,7 +22,7 @@ fn fake_claude(plan: &str) -> String {
     format!(
         r#"#!/bin/sh
 case "$*" in
-  *--disallowedTools*)
+  *--disallowedTools\ Write*)
     read prompt
     echo '{{"type":"result","subtype":"success","is_error":false,"result":"Which colour should the logo keep?"}}'
     read answer

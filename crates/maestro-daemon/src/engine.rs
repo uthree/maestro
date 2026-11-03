@@ -49,10 +49,10 @@ use std::time::Instant;
 
 use maestro_core::{
     AgentEvent, AgentId, AgentRole, AgentSpec, COMMANDER_INSTRUCTIONS, CONVERSATION_LIMIT,
-    Checkout, Contender, Difficulty, Host, LEAD_INSTRUCTIONS, ModelChoice, ModelKey, Node, NodeId,
-    NodeRef, NodeStatus, Outcome, PLAN_REJECTED, Placement, Plan, Project, ProjectId, ProviderKind,
-    ResourceId, WORKER_INSTRUCTIONS, Workflow, WorkflowId, WorkflowTarget, Workspace, Worktree,
-    conversation,
+    Checkout, Contender, Difficulty, Host, LEAD_INSTRUCTIONS, ModelChoice, ModelKey, NO_DELEGATION,
+    NO_SUBAGENTS, Node, NodeId, NodeRef, NodeStatus, Outcome, PLAN_REJECTED, Placement, Plan,
+    Project, ProjectId, ProviderKind, ResourceId, WORKER_INSTRUCTIONS, Workflow, WorkflowId,
+    WorkflowTarget, Workspace, Worktree, conversation,
 };
 use maestro_host::git;
 use maestro_host::github::{self, PullRequestDraft};
@@ -104,6 +104,8 @@ struct Worker {
     contender: bool,
     /// In a turn, so using the host's compute and the provider's quota.
     busy: bool,
+    /// May hand its work to sub-agents of its own.
+    subagents: bool,
 }
 
 /// An agent planning a delegated node.
@@ -112,6 +114,10 @@ struct Lead {
     node: NodeRef,
     /// In a turn, so taking room under the limit on agents.
     busy: bool,
+    /// The CLI it runs on.
+    provider: ProviderKind,
+    /// May delegate, and use its CLI's sub-agents.
+    subagents: bool,
 }
 
 /// Who wrote a plan, which decides where the plan's workflow runs.
@@ -313,7 +319,24 @@ impl Engine {
     fn observe_worker(&mut self, agent: AgentId, event: AgentEvent) {
         let Some(worker) = self.workers.get(&agent) else { return };
         let (workflow, node, contender) = (worker.workflow, worker.node, worker.contender);
+        let provider = worker.model.provider;
         match event {
+            AgentEvent::ToolStarted { call }
+                if !worker.subagents && maestro_agents::starts_subagent(provider, &call.name) =>
+            {
+                // It is passing the work on: stop it before the sub-agent gets far. The user
+                // can tell it to carry on itself, which starts it again in the same worktree.
+                if let Some(worker) = self.workers.get_mut(&agent) {
+                    worker.busy = false;
+                }
+                self.record(agent, false);
+                if contender {
+                    self.settle(agent, NodeStatus::Failed);
+                } else {
+                    self.fail(workflow, node, handed_on(&call.name));
+                }
+                self.runtime.execute(Command::StopAgent { agent }).ok();
+            }
             AgentEvent::PermissionRequested { .. } if contender => {
                 self.settle(agent, NodeStatus::AwaitingUser);
             }
@@ -370,8 +393,20 @@ impl Engine {
     fn observe_lead(&mut self, agent: AgentId, event: AgentEvent) {
         let Some(lead) = self.leads.get(&agent) else { return };
         let node = lead.node;
+        let refuses =
+            |tool: &str| !lead.subagents && maestro_agents::starts_subagent(lead.provider, tool);
         let status = self.inner.lock().expect("hub lock").state.status(node);
         match event {
+            AgentEvent::ToolStarted { call } if refuses(&call.name) => {
+                if let Some(lead) = self.leads.get_mut(&agent) {
+                    lead.busy = false;
+                }
+                if self.under(node).is_empty() {
+                    self.fail(node.workflow, node.node, handed_on(&call.name));
+                }
+                self.runtime.execute(Command::StopAgent { agent }).ok();
+                self.advance_all();
+            }
             AgentEvent::Prompted { .. } => {
                 if let Some(lead) = self.leads.get_mut(&agent) {
                     lead.busy = true;
@@ -788,10 +823,11 @@ impl Engine {
             model: model.clone(),
             workspace,
             project: flow.project,
+            subagents: node.allows_subagents(),
         };
         let agent = self
             .runtime
-            .start(spec, WORKER_INSTRUCTIONS.into(), &brief.prompt)
+            .start(spec, worker_instructions(node), &brief.prompt)
             .map_err(|error| error.to_string())?;
         let key = if contender {
             contender_key(flow.id, node.id, agent)
@@ -813,6 +849,7 @@ impl Engine {
                 key,
                 contender,
                 busy: true,
+                subagents: node.allows_subagents(),
             },
         );
         Ok(agent)
@@ -835,13 +872,19 @@ impl Engine {
             model: model.clone(),
             workspace,
             project: flow.project,
+            subagents: node.allows_subagents(),
         };
         let agent = self
             .runtime
-            .start(spec, LEAD_INSTRUCTIONS.into(), &brief.prompt)
+            .start(spec, lead_instructions(node), &brief.prompt)
             .map_err(|error| error.to_string())?;
-        let node = NodeRef { workflow: flow.id, node: node.id };
-        self.leads.insert(agent, Lead { node, busy: true });
+        let lead = Lead {
+            node: NodeRef { workflow: flow.id, node: node.id },
+            busy: true,
+            provider: model.provider,
+            subagents: node.allows_subagents(),
+        };
+        self.leads.insert(agent, lead);
         Ok(agent)
     }
 
@@ -887,10 +930,16 @@ impl Engine {
                 model: model.clone(),
                 workspace,
                 project: flow.project,
+                subagents: node.allows_subagents(),
             };
-            let agent = self.runtime.start(spec, LEAD_INSTRUCTIONS.into(), &prompt)?;
-            let reference = NodeRef { workflow, node: id };
-            self.leads.insert(agent, Lead { node: reference, busy: true });
+            let agent = self.runtime.start(spec, lead_instructions(node), &prompt)?;
+            let lead = Lead {
+                node: NodeRef { workflow, node: id },
+                busy: true,
+                provider: model.provider,
+                subagents: node.allows_subagents(),
+            };
+            self.leads.insert(agent, lead);
             self.update(workflow, |flow| flow.assign(id, agent, model, branch).ok())?;
             return Ok(Reply::Done);
         }
@@ -907,8 +956,9 @@ impl Engine {
             model: model.clone(),
             workspace,
             project: flow.project,
+            subagents: node.allows_subagents(),
         };
-        let agent = self.runtime.start(spec, WORKER_INSTRUCTIONS.into(), &prompt)?;
+        let agent = self.runtime.start(spec, worker_instructions(node), &prompt)?;
         self.workers.insert(
             agent,
             Worker {
@@ -924,6 +974,7 @@ impl Engine {
                 key: node_key(workflow, node),
                 contender: false,
                 busy: true,
+                subagents: node.allows_subagents(),
             },
         );
         self.update(workflow, |flow| flow.assign(id, agent, model, branch).ok())?;
@@ -995,6 +1046,7 @@ impl Engine {
         for plan in plans {
             // Placing the plan may clone a repository, so it happens before the lock is taken.
             let placed = plan.map_err(|error| error.to_string()).and_then(|plan| {
+                self.may_delegate(planner, &plan)?;
                 let (project, target) = self.plan_target(planner, &plan)?;
                 Ok((plan, project, target))
             });
@@ -1044,6 +1096,21 @@ impl Engine {
             self.advance(workflow);
         }
         Adopted { workflows: adopted.len(), rejected }
+    }
+
+    /// Refuses a lead's plan that delegates when its node does not let it.
+    fn may_delegate(&self, planner: Planner, plan: &Plan) -> Result<(), String> {
+        let Planner::Lead(node) = planner else { return Ok(()) };
+        let allowed =
+            self.leads.values().find(|lead| lead.node == node).is_none_or(|lead| lead.subagents);
+        match plan.nodes.iter().find(|step| step.delegate) {
+            Some(step) if !allowed => Err(format!(
+                "step {:?} is delegated, but this step may not delegate: give every node to a \
+                 worker, without \"delegate\": true",
+                step.key
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The project a plan belongs to and where it runs: on the resources a commander names, or
@@ -1141,8 +1208,13 @@ impl Engine {
             }
         };
         let workspace = Workspace { host, repository, worktree: None };
-        let spec =
-            AgentSpec { role: AgentRole::Commander, model, workspace, project: Some(project) };
+        let spec = AgentSpec {
+            role: AgentRole::Commander,
+            model,
+            workspace,
+            project: Some(project),
+            subagents: true,
+        };
         let agent = self.runtime.start(spec, COMMANDER_INSTRUCTIONS.into(), prompt)?;
         self.commanders.insert(agent, project);
         let mut inner = self.inner.lock().expect("hub lock");
@@ -1252,6 +1324,32 @@ fn last_answer(events: &[AgentEvent]) -> Option<String> {
     }
     let end: String = answer.chars().skip(length - REPORT_LIMIT).collect();
     Some(format!("…{end}"))
+}
+
+/// What a node's worker is told before its first message.
+fn worker_instructions(node: &Node) -> String {
+    if node.allows_subagents() {
+        WORKER_INSTRUCTIONS.into()
+    } else {
+        format!("{WORKER_INSTRUCTIONS} {NO_SUBAGENTS}")
+    }
+}
+
+/// What a delegated node's lead is told before its first message.
+fn lead_instructions(node: &Node) -> String {
+    if node.allows_subagents() {
+        LEAD_INSTRUCTIONS.into()
+    } else {
+        format!("{LEAD_INSTRUCTIONS}\n\n{NO_DELEGATION}")
+    }
+}
+
+/// Why an agent was stopped for calling `tool`.
+fn handed_on(tool: &str) -> String {
+    format!(
+        "it handed its work to a sub-agent ({tool}), which this step does not allow; tell it to \
+         do the work itself, or allow sub-agents on the step"
+    )
 }
 
 /// The conversation a node was planned in, as a section of its agent's first message, or

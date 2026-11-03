@@ -495,6 +495,7 @@ mod tests {
                     worktree: None,
                 },
                 project: None,
+                subagents: true,
             },
             status: AgentStatus::Working,
             transcript: Transcript::default(),

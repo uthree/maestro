@@ -112,6 +112,18 @@ Maestro は、Claude Code、Codex、Antigravity CLI、OpenCode といったコ�
   起動時に始まります。
 - GUI では、サイドバーで下のワークフローを親の下に字下げして並べ、ノードの詳細に「リードに任せる」と
   下のワークフローへのリンクを出します。上限は設定の「作業の割り当て」で変えられます。
+- **サブエージェントの禁止**: 受け持ったエージェントが作業をさらに別のエージェントへ回せるかは、ノードの
+  `subagents`（計画では `"subagents": true/false`、`Node::allows_subagents`）で決まります。既定では、
+  ワーカーは禁止（任された本人が作業する）、リードは許可（任せるのが役目）です。
+  - ワーカー: Claude Code は `--disallowedTools Task,Agent`、OpenCode は `OPENCODE_PERMISSION` の
+    `"task":"deny"` で起動時に止めます。起動時に止める手段のない Codex（`collabAgentToolCall`）と
+    Antigravity（`invoke_subagent` など）は、呼んだ時点でデーモンが検出してエージェントを止め、ノードを
+    失敗にします（`maestro_agents::starts_subagent`）。ルーターには失敗として記録します。ユーザーが
+    ノードにメッセージを送れば、同じワークツリーで再開できます。
+  - リード: 禁止なら、`"delegate": true` を含む計画は差し戻し、全ステップをワーカーに渡す計画を書き直させます。
+    CLI のサブエージェントもワーカーと同じく止めます。
+  - 禁止のときは、ワーカーとリードの指示にもその旨を足します（`NO_SUBAGENTS`、`NO_DELEGATION`）。
+    GUI ではノードの詳細のスイッチで、開始前に切り替えられます。
 
 ### 分けない計画（会話を引き継ぐノード）
 

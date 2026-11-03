@@ -378,7 +378,9 @@ struct Claude {
 impl Claude {
     fn new(invocation: &Invocation) -> Self {
         Self {
-            read_only: invocation.args.iter().any(|arg| arg == "--disallowedTools"),
+            read_only: invocation
+                .flag("--disallowedTools")
+                .is_some_and(|tools| tools.split(',').any(|tool| tool == "Write")),
             model: invocation.flag("--model"),
             started: false,
             asked: 0,

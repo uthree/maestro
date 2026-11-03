@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 
 use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text};
 
+/// The tools that start a sub-agent: `Task`, called `Agent` in later versions.
+pub(crate) const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
+
 pub(crate) struct Claude {
     config: WorkerConfig,
     answer: String,
@@ -76,8 +79,15 @@ impl Adapter for Claude {
             // A worker must not inherit the runtime of an agent that started the daemon.
             .env_remove("CLAUDECODE")
             .env_remove("CLAUDE_CODE_ENTRYPOINT");
+        let mut refused: Vec<&str> = Vec::new();
         if config.read_only {
-            command = command.args(["--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit"]);
+            refused.extend(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+        }
+        if !config.subagents {
+            refused.extend(SUBAGENT_TOOLS);
+        }
+        if !refused.is_empty() {
+            command = command.args(["--disallowedTools", &refused.join(",")]);
         }
         if !config.instructions.is_empty() {
             command = command.args(["--append-system-prompt", &config.instructions]);
@@ -228,6 +238,25 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
         assert!(args.iter().any(|arg| arg == "--model=model-x"));
         assert_eq!(command.cwd.as_deref(), Some(std::path::Path::new("/work/n1")));
+        assert!(!args.iter().any(|arg| arg == "--disallowedTools"));
+    }
+
+    #[test]
+    fn refused_tools_are_listed_once_together() {
+        let refused = |read_only, subagents| {
+            let config = WorkerConfig { read_only, subagents, ..config(ProviderKind::ClaudeCode) };
+            let args = Claude::new(config).command().args;
+            let at = args.iter().position(|arg| arg == "--disallowedTools")?;
+            assert_eq!(args.iter().filter(|arg| *arg == "--disallowedTools").count(), 1);
+            args.get(at + 1).cloned()
+        };
+        assert_eq!(refused(false, false).as_deref(), Some("Task,Agent"));
+        assert_eq!(
+            refused(true, false).as_deref(),
+            Some("Write,Edit,MultiEdit,NotebookEdit,Task,Agent")
+        );
+        assert_eq!(refused(true, true).as_deref(), Some("Write,Edit,MultiEdit,NotebookEdit"));
+        assert_eq!(refused(false, true), None);
     }
 
     #[test]

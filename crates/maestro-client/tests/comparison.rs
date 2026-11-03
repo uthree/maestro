@@ -54,6 +54,7 @@ fn draft(title: &str, difficulty: Difficulty, tags: &[&str]) -> NodeDraft {
         difficulty: Some(difficulty),
         tags: tags.iter().map(|&tag| tag.to_owned()).collect(),
         delegate: false,
+        subagents: None,
         origin: NodeOrigin::User,
         conversation: None,
     }

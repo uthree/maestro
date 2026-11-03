@@ -59,6 +59,8 @@ Keys are short names used only to express dependencies within the plan. The exam
 
 A node too large or too open for one worker can be handed to a lead instead: add "delegate": true and describe the outcome wanted rather than the steps. A lead is an agent like you that plans that node alone as a plan of its own, with workers (or leads of its own) under it, and the node succeeds once the lead's plan has. Delegate only what genuinely needs planning of its own; most nodes should go straight to a worker.
 
+A worker does its node itself: Maestro stops it if it hands the work to sub-agents of its own (its CLI's built-in task or subagent tools). When a node is easier for a worker that may use them, for example to search a large codebase in parallel, add "subagents": true. A lead may delegate in turn; add "subagents": false to a delegated node to keep its lead from delegating further, so that its plan goes straight to workers.
+
 You lead one project. A <maestro-project> block, which Maestro adds ahead of a message the first time and whenever it changes, lists the project's resources with their ids: GitHub repositories, folders on a machine, SSH machines, and the AI providers workers may use. Decide which repository or folder each plan works in and put its id in the plan as "resource": "r1". A GitHub repository is cloned onto a machine first: add "machine": "r3" to run it on an SSH machine of the project, or leave it out for the daemon's own machine. A folder always runs on its own machine. When the project has a single repository you may leave "resource" out. When it is not clear which resource the user means, or the choice matters (a slow machine, a repository they might not want touched), say which you would use and why, and ask before writing the plan. One plan works in one repository; for work in several, write one plan for each. If the project lacks something the work needs, tell the user to add it to the project.
 
 Work runs in the background, and the user keeps talking with you while it does, so they may ask for more before earlier work is finished. A message may begin with a <maestro-status> block that Maestro adds: it lists the work already planned, each step with its id (such as wf1/n2) and where it is. The user does not see it. When a new step needs a listed step's result (it changes the same code, or builds on what that step adds), put that step's id in the new step's "after" list, as in "after": ["wf1/n2"]. Maestro then starts the new step by itself once those steps have succeeded, with their work merged into its worktree. Leave "after" out for work that does not need them, so that it starts at once and runs in parallel.
@@ -68,7 +70,7 @@ A plan starts running as soon as you write it, so write the block only once the 
 /// What a lead is told before the step it plans.
 pub const LEAD_INSTRUCTIONS: &str = r#"You are a Maestro lead. A step of a larger plan was handed to you because it needs planning of its own: you plan it as a plan of smaller steps, and workers carry them out. You never do the work yourself. You must not edit files or run commands that change anything. Reading the repository, which is checked out here with the work of the steps before yours merged in, to plan well is fine.
 
-Each node of your plan goes to one worker, which runs in its own git worktree starting from this one, with the work of the nodes it depends on already merged in. A worker sees its node's instructions and the replies of the workers before it, so make each node's instructions complete on its own: what to change, where, and how to know it is done. Every split loses detail: split only where the parts are independent enough to run in parallel, cut nodes where little context crosses between them, and prefer one substantial node to several that need each other's details. Add "context": "conversation" to a node to hand its worker what was said to you here, the step you were given and anything the user told you, as well as its instructions. A node that itself needs planning of its own can go to a lead under you: add "delegate": true and describe the outcome wanted.
+Each node of your plan goes to one worker, which runs in its own git worktree starting from this one, with the work of the nodes it depends on already merged in. A worker sees its node's instructions and the replies of the workers before it, so make each node's instructions complete on its own: what to change, where, and how to know it is done. Every split loses detail: split only where the parts are independent enough to run in parallel, cut nodes where little context crosses between them, and prefer one substantial node to several that need each other's details. Add "context": "conversation" to a node to hand its worker what was said to you here, the step you were given and anything the user told you, as well as its instructions. A node that itself needs planning of its own can go to a lead under you: add "delegate": true and describe the outcome wanted. A worker does its node itself and is stopped if it hands the work to sub-agents of its own; add "subagents": true to a node whose worker may use them, or "subagents": false to a delegated node whose lead must not delegate further.
 
 Rate each node's difficulty: "trivial", "easy", "moderate", "hard" or "expert"; it decides the model and effort the node gets. Tag each node with one to three short lowercase words for the kind of work, such as "ui", "api", "tests", "docs" or "refactor".
 
@@ -86,6 +88,12 @@ Keys are short names used only to express dependencies within the plan. Your pla
 
 /// What every worker is told, ahead of its node's instructions.
 pub const WORKER_INSTRUCTIONS: &str = "You are a Maestro worker carrying out one step of a larger plan. Work only inside the current directory, which is a git worktree made for this step; the work of the steps this one depends on is already merged into it. Do not commit, push, or switch branches: Maestro commits your work when you finish. When you are done, reply with a short summary of what you changed and anything the user should check.";
+
+/// What a worker that may not use sub-agents is told after [`WORKER_INSTRUCTIONS`].
+pub const NO_SUBAGENTS: &str = "Do this step yourself. Do not hand it, or any part of it, to sub-agents, subagent tools or task tools: Maestro stops a worker that does.";
+
+/// What a lead that may not delegate is told after its step.
+pub const NO_DELEGATION: &str = "Do not delegate: no node of your plan may have \"delegate\": true. Every node goes straight to a worker.";
 
 /// A plan as the commander writes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +133,10 @@ pub struct PlanNode {
     /// Hand the step to a lead, who plans it as a workflow of its own.
     #[serde(default)]
     pub delegate: bool,
+    /// Whether the step's agent may hand work to sub-agents of its own, or `None` for the
+    /// default of its role: a lead may delegate, a worker may not use its CLI's sub-agents.
+    #[serde(default)]
+    pub subagents: Option<bool>,
     /// What the step's agent is handed besides its instructions.
     #[serde(default)]
     pub context: PlanContext,
@@ -224,6 +236,7 @@ impl Plan {
                 difficulty: node.difficulty,
                 tags: node.tags.clone(),
                 delegate: node.delegate,
+                subagents: node.subagents,
                 origin: NodeOrigin::Commander,
                 conversation: match node.context {
                     PlanContext::Conversation => conversation.map(str::to_owned),
@@ -415,6 +428,19 @@ mod tests {
     }
 
     #[test]
+    fn leads_may_delegate_and_workers_may_not_use_subagents_unless_the_plan_says() {
+        let text = "```maestro-plan\n{\"title\":\"t\",\"nodes\":[\
+            {\"key\":\"a\",\"title\":\"A\",\"instructions\":\"\",\"difficulty\":\"hard\",\"delegate\":true},\
+            {\"key\":\"b\",\"title\":\"B\",\"instructions\":\"\",\"difficulty\":\"hard\",\"delegate\":true,\"subagents\":false},\
+            {\"key\":\"c\",\"title\":\"C\",\"instructions\":\"\",\"difficulty\":\"easy\"},\
+            {\"key\":\"d\",\"title\":\"D\",\"instructions\":\"\",\"difficulty\":\"easy\",\"subagents\":true}]}\n```";
+        let [Ok(plan)] = &Plan::extract(text)[..] else { panic!() };
+        let workflow = plan.clone().into_workflow(WorkflowId(1), None, |_| false, None).unwrap();
+        let allows = |node| workflow.node(NodeId(node)).unwrap().allows_subagents();
+        assert_eq!([allows(1), allows(2), allows(3), allows(4)], [true, false, false, true]);
+    }
+
+    #[test]
     fn finds_every_block_and_reports_bad_ones() {
         let text = "Here it is:\n```maestro-plan\n{\"title\":\"a\",\"nodes\":[]}\n```\nand\n```maestro-plan\nnot json\n```\n```rust\nfn main() {}\n```";
         let plans = Plan::extract(text);
@@ -435,6 +461,7 @@ mod tests {
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
             after: Vec::new(),
             delegate: false,
+            subagents: None,
             context: PlanContext::Instructions,
         };
         let plan = |nodes| Plan { title: "t".into(), resource: None, machine: None, nodes };
@@ -470,6 +497,7 @@ mod tests {
             depends_on: Vec::new(),
             after: vec![after.into()],
             delegate: false,
+            subagents: None,
             context: PlanContext::Instructions,
         };
         let plan = |after| Plan {
@@ -508,6 +536,7 @@ mod tests {
             depends_on: depends.iter().map(|&key| key.to_owned()).collect(),
             after: after.iter().map(|&key| key.to_owned()).collect(),
             delegate: false,
+            subagents: None,
             context: PlanContext::Instructions,
         };
         let mut first = plan(vec![node("a", &[], &[])])
