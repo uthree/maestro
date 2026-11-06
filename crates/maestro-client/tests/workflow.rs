@@ -18,7 +18,7 @@ use maestro_core::{
 use maestro_daemon::Hub;
 use maestro_protocol::{Command, Event, Reply};
 
-/// As commander (started with `--disallowedTools`), replies with a two-step plan, then keeps
+/// As commander (started read-only), replies with a two-step plan, then keeps
 /// what it is told next in `$MAESTRO_TEST_DIR/briefed` and replies with a plan that builds on the
 /// first. As worker, leaves a file named after its worktree and a list of what it found there,
 /// then on each later message leaves another file. A worker told to WAIT first waits for
@@ -27,7 +27,7 @@ fn fake_claude(plan: &str, more: &str) -> String {
     format!(
         r#"#!/bin/sh
 case "$*" in
-  *--disallowedTools*)
+  *--disallowedTools\ Write*)
     read prompt
     cat <<'PLAN'
 {plan}

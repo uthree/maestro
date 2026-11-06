@@ -106,6 +106,7 @@ fn a_worker_runs_in_its_worktree_and_waits_for_permission() {
             worktree: Some(worktree.clone()),
         },
         project: None,
+        subagents: true,
     };
     let Reply::AgentStarted { agent } = client
         .request(Command::StartAgent {

@@ -74,6 +74,11 @@ pub struct NodeDraft {
     /// Hand it to a lead, who plans it as a workflow of its own, rather than to one worker.
     #[serde(default)]
     pub delegate: bool,
+    /// Whether its agent may hand work to sub-agents of its own: the CLI's built-in ones for a
+    /// worker, delegated steps for a lead. `None` takes the default for its role, see
+    /// [`Node::allows_subagents`].
+    #[serde(default)]
+    pub subagents: Option<bool>,
     /// Who wrote it.
     pub origin: NodeOrigin,
     /// The planner's conversation, handed to its agent with the instructions.
@@ -99,6 +104,9 @@ pub struct NodeEdit {
     /// Whether a lead plans it rather than one worker doing it.
     #[serde(default)]
     pub delegate: Option<bool>,
+    /// Whether its agent may hand work to sub-agents; `Some(None)` returns to the role's default.
+    #[serde(default)]
+    pub subagents: Option<Option<bool>>,
 }
 
 /// One piece of work for one worker.
@@ -122,6 +130,10 @@ pub struct Node {
     /// [`Node::agent`] is then the lead, and it succeeds when the lead's workflows have.
     #[serde(default)]
     pub delegate: bool,
+    /// Whether its agent may hand work to sub-agents of its own, or `None` for the default of its
+    /// role. See [`Node::allows_subagents`].
+    #[serde(default)]
+    pub subagents: Option<bool>,
     /// Who wrote it.
     pub origin: NodeOrigin,
     /// The conversation of the commander or lead that planned it, as far as it had got when the
@@ -145,6 +157,15 @@ pub struct Node {
     /// into its worktree when they are in the same repository.
     #[serde(default)]
     pub after: Vec<NodeRef>,
+}
+
+impl Node {
+    /// Whether its agent may hand work to sub-agents of its own. Unless the node says, a lead
+    /// may (delegating is what it is for) and a worker may not, so that the one given the work
+    /// does it rather than passing it on.
+    pub fn allows_subagents(&self) -> bool {
+        self.subagents.unwrap_or(self.delegate)
+    }
 }
 
 /// One of the workers a node ran on at once. Each works in its own worktree on its own branch;
@@ -385,6 +406,7 @@ impl Workflow {
             difficulty,
             tags,
             delegate,
+            subagents,
             origin,
             conversation,
         } = draft;
@@ -397,6 +419,7 @@ impl Workflow {
             difficulty,
             tags,
             delegate,
+            subagents,
             origin,
             conversation,
             status,
@@ -472,7 +495,7 @@ impl Workflow {
         by: NodeOrigin,
     ) -> Result<(), WorkflowError> {
         let node = self.node_mut(id)?;
-        let NodeEdit { title, instructions, model, difficulty, tags, delegate } = edit;
+        let NodeEdit { title, instructions, model, difficulty, tags, delegate, subagents } = edit;
         if let Some(title) = title {
             node.title = title;
         }
@@ -490,6 +513,9 @@ impl Workflow {
         }
         if let Some(delegate) = delegate {
             node.delegate = delegate;
+        }
+        if let Some(subagents) = subagents {
+            node.subagents = subagents;
         }
         if by == NodeOrigin::User {
             node.origin = NodeOrigin::User;
@@ -690,6 +716,7 @@ mod tests {
             difficulty: None,
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: NodeOrigin::Commander,
             conversation: None,
         }

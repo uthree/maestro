@@ -52,4 +52,12 @@ pub struct AgentSpec {
     /// The project it works for: the one a commander leads, or the one a worker's node is in.
     #[serde(default)]
     pub project: Option<ProjectId>,
+    /// Whether it may hand work to sub-agents of its own (its CLI's task or subagent tools).
+    /// Workers, unless their node says otherwise, may not.
+    #[serde(default = "allowed")]
+    pub subagents: bool,
+}
+
+fn allowed() -> bool {
+    true
 }

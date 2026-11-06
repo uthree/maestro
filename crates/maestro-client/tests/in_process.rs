@@ -15,6 +15,7 @@ fn draft(title: &str) -> NodeDraft {
         difficulty: None,
         tags: Vec::new(),
         delegate: false,
+        subagents: None,
         origin: NodeOrigin::User,
         conversation: None,
     }

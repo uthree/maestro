@@ -96,6 +96,7 @@ mod tests {
             difficulty: None,
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: NodeOrigin::User,
             conversation: None,
         };
@@ -118,6 +119,7 @@ mod tests {
             },
             workspace: Workspace { host: Host::Local, repository: "/r".into(), worktree: None },
             project: None,
+            subagents: true,
         };
         let agent = SavedAgent {
             id: AgentId(1),

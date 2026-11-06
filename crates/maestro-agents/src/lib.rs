@@ -44,6 +44,9 @@ pub struct WorkerConfig {
     /// Refuse every change to files, where the CLI can be told so up front. The commander runs
     /// this way; the daemon also refuses any permission it asks for.
     pub read_only: bool,
+    /// Whether it may start sub-agents of its own. Where the CLI can be told so up front, its
+    /// sub-agent tools are refused; otherwise [`starts_subagent`] lets the daemon notice their use.
+    pub subagents: bool,
 }
 
 /// What an adapter produced from one message.
@@ -98,6 +101,19 @@ pub fn adapter(config: WorkerConfig) -> Box<dyn Adapter> {
     }
 }
 
+/// Whether `tool`, a [`maestro_core::ToolCall::name`] the provider's adapter reported, hands work
+/// to a sub-agent. A worker that may not start sub-agents is stopped when it calls one: some
+/// CLIs can be told up front (see [`WorkerConfig::subagents`]) and some cannot.
+pub fn starts_subagent(provider: ProviderKind, tool: &str) -> bool {
+    let tools: &[&str] = match provider {
+        ProviderKind::ClaudeCode => &claude::SUBAGENT_TOOLS,
+        ProviderKind::Codex => &codex::SUBAGENT_TOOLS,
+        ProviderKind::Antigravity => &antigravity::SUBAGENT_TOOLS,
+        ProviderKind::OpenCode => &opencode::SUBAGENT_TOOLS,
+    };
+    tools.iter().any(|name| name.eq_ignore_ascii_case(tool))
+}
+
 /// What separates two messages of one turn, in the answer and in the streamed text.
 const PARAGRAPH: &str = "\n\n";
 
@@ -133,5 +149,23 @@ fn config(provider: ProviderKind) -> WorkerConfig {
         instructions: "Only touch src/.".into(),
         program: None,
         read_only: false,
+        subagents: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_provider_names_its_own_sub_agent_tools() {
+        assert!(starts_subagent(ProviderKind::ClaudeCode, "Task"));
+        assert!(starts_subagent(ProviderKind::ClaudeCode, "Agent"));
+        assert!(!starts_subagent(ProviderKind::ClaudeCode, "Bash"));
+        assert!(starts_subagent(ProviderKind::Antigravity, "invoke_subagent"));
+        assert!(!starts_subagent(ProviderKind::Antigravity, "run_command"));
+        assert!(starts_subagent(ProviderKind::OpenCode, "task"));
+        assert!(starts_subagent(ProviderKind::Codex, "collabAgentToolCall"));
+        assert!(!starts_subagent(ProviderKind::Codex, "commandExecution"));
     }
 }

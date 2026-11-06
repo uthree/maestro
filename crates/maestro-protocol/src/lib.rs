@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -726,6 +726,7 @@ mod tests {
             difficulty: None,
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: maestro_core::NodeOrigin::User,
             conversation: None,
         });
@@ -736,6 +737,7 @@ mod tests {
             difficulty: None,
             tags: Vec::new(),
             delegate: false,
+            subagents: None,
             origin: maestro_core::NodeOrigin::User,
             conversation: None,
         });

@@ -28,6 +28,7 @@ fn worker(provider: ProviderKind, scenario: &str) -> Worker {
         instructions: String::new(),
         program: Some(env!("CARGO_BIN_EXE_maestro-mock").into()),
         read_only: false,
+        subagents: true,
     };
     Worker { config, _directory: directory }
 }

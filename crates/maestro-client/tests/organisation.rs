@@ -25,7 +25,7 @@ fn answer(plan: serde_json::Value) -> String {
         .to_string()
 }
 
-/// Planners (started with `--disallowedTools`) answer by the step they were given: the lead of
+/// Planners (started read-only) answer by the step they were given: the lead of
 /// "Outer", the lead of "Inner", or else the commander. Workers leave a file named after their
 /// worktree and a list of what they found there. Every agent but the commander holds
 /// `$MAESTRO_TEST_DIR/busy` during its turn, and leaves `overlap` if another already held it.
@@ -48,7 +48,7 @@ hold() {{ mkdir "$MAESTRO_TEST_DIR/busy" 2>/dev/null || touch "$MAESTRO_TEST_DIR
 free() {{ rmdir "$MAESTRO_TEST_DIR/busy"; }}
 read prompt
 case "$*" in
-  *--disallowedTools*)
+  *--disallowedTools\ Write*)
     case "$prompt" in
       *"# Outer"*) hold; free; cat <<'PLAN'
 {outer}

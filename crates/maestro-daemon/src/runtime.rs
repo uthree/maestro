@@ -245,6 +245,7 @@ impl Runtime {
             instructions,
             program: None,
             read_only: spec.role.plans(),
+            subagents: spec.subagents,
         };
         let message = self.briefed(agent, prompt);
         let this = self.this.clone();

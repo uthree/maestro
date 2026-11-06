@@ -565,6 +565,7 @@ impl Maestro {
             .map(|child| (child.id, child.title.clone(), Progress::of(child)))
             .collect();
         let delegate = node.delegate;
+        let subagents = node.allows_subagents();
         let unstarted = node.status == NodeStatus::Pending;
 
         div()
@@ -670,6 +671,34 @@ impl Maestro {
                             "A lead plans the step as a workflow of its own, whose steps can go to leads in turn",
                             "リードがこのステップを独自のワークフローとして計画します。その中のステップも、さらにリードに任せられます",
                         ))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Faint),
+                    )
+                    .child(
+                        Switch::new("subagents", subagents)
+                            .label(if delegate {
+                                tr("Let the lead delegate further", "リードがさらに任せるのを許す")
+                            } else {
+                                tr("Let the worker use sub-agents", "ワーカーのサブエージェントを許す")
+                            })
+                            .disabled(!unstarted)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let edit = NodeEdit { subagents: Some(Some(!subagents)), ..NodeEdit::default() };
+                                this.edit_node(id, edit, cx);
+                            })),
+                    )
+                    .child(
+                        Label::new(if delegate {
+                            tr(
+                                "Off: every step of the lead's plan goes straight to a worker",
+                                "オフにすると、リードの計画のステップはすべてワーカーが直接受け持ちます",
+                            )
+                        } else {
+                            tr(
+                                "Off: the worker does the step itself, and is stopped if it hands it to its CLI's sub-agents",
+                                "オフにすると、ワーカー自身が作業します。CLI のサブエージェントに渡そうとすると停止します",
+                            )
+                        })
                         .size(TextSize::XSmall)
                         .color(TextColor::Faint),
                     )

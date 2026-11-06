@@ -13,6 +13,10 @@ use serde_json::{Value, json};
 use crate::rpc::{self, Calls};
 use crate::{Adapter, Output, PARAGRAPH, WorkerConfig, content_text, with_instructions};
 
+/// What a call that starts or drives another agent is reported as. Codex has no switch for them
+/// in `thread/start`, so a worker that may not use them is noticed when it does.
+pub(crate) const SUBAGENT_TOOLS: [&str; 1] = ["collabAgentToolCall"];
+
 enum Purpose {
     Initialize,
     StartThread,
@@ -197,7 +201,10 @@ impl Codex {
 }
 
 fn is_tool(item: &Value) -> bool {
-    matches!(item["type"].as_str(), Some("commandExecution" | "fileChange" | "mcpToolCall"))
+    matches!(
+        item["type"].as_str(),
+        Some("commandExecution" | "fileChange" | "mcpToolCall" | "collabAgentToolCall")
+    )
 }
 
 fn tool_name(item: &Value) -> String {
