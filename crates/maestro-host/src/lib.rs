@@ -18,7 +18,7 @@ pub mod shell;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use maestro_core::Host;
 use thiserror::Error;
@@ -78,7 +78,7 @@ impl HostCommand {
     pub fn process(&self, host: &Host) -> Command {
         match host {
             Host::Local => {
-                let mut command = Command::new(&self.program);
+                let mut command = Command::new(local_program(&self.program));
                 command.args(&self.args);
                 if let Some(cwd) = &self.cwd {
                     command.current_dir(cwd);
@@ -159,6 +159,73 @@ impl HostCommand {
     }
 }
 
+/// The program to start on this machine for `program`.
+///
+/// On Windows, `std::process::Command` looks only for `program.exe`, so a CLI installed as a
+/// `.cmd` shim (as `npm install -g` installs `codex`) would never be found; [`locate`] finds it
+/// the way the Windows shell does. Elsewhere, and for a program not found, the name is returned
+/// as given.
+pub fn local_program(program: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(found) = locate(program) {
+        return found;
+    }
+    PathBuf::from(program)
+}
+
+/// Where `program` is on this machine, looked up as the Windows shell does: in each directory of
+/// `PATH`, with each extension in `PATHEXT`. A path is checked only where it points, and a name
+/// with an extension of its own (`codex.cmd`) is also tried as written. `None` when nothing
+/// matches.
+#[cfg(windows)]
+pub fn locate(program: &str) -> Option<PathBuf> {
+    let path = std::path::Path::new(program);
+    // Lower case, as installers name their files: the file system ignores case either way.
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let pathext = pathext.to_ascii_lowercase();
+    let mut extensions: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    if path.extension().is_some() {
+        extensions.insert(0, "");
+    }
+    let directories: Vec<PathBuf> = if path.components().count() > 1 {
+        vec![PathBuf::new()]
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?).collect()
+    };
+    directories.iter().find_map(|directory| {
+        extensions
+            .iter()
+            .map(|extension| directory.join(format!("{program}{extension}")))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Kills `child` and every process it started.
+///
+/// On Windows a CLI installed as a `.cmd` shim runs as `cmd.exe`, which starts `node`, which may
+/// start the CLI's own binary. Killing only `cmd.exe` leaves the rest running, still holding the
+/// child's output open, so `taskkill /T` takes the whole tree. Elsewhere this is [`Child::kill`].
+pub fn kill_tree(child: &mut Child) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let killed = HostCommand::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .output(&Host::Local);
+        if killed.is_ok_and(|output| output.status.success()) {
+            return Ok(());
+        }
+    }
+    child.kill()
+}
+
+/// The user's home directory on this machine: `HOME`, else `USERPROFILE` (as on Windows).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
 /// A command could not be run, or ran and failed.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -201,9 +268,13 @@ mod tests {
 
     #[test]
     fn a_local_command_runs_as_given() {
-        let command = HostCommand::new("claude").args(["--print", "a b"]).cwd("/w").env("K", "v");
+        // A name found nowhere, so no lookup turns it into a path.
+        let command = HostCommand::new("maestro-no-such-cli")
+            .args(["--print", "a b"])
+            .cwd("/w")
+            .env("K", "v");
         let process = command.process(&Host::Local);
-        assert_eq!(process.get_program(), "claude");
+        assert_eq!(process.get_program(), "maestro-no-such-cli");
         assert_eq!(args(&process), ["--print", "a b"]);
         assert_eq!(process.get_current_dir(), Some(std::path::Path::new("/w")));
     }
@@ -242,6 +313,41 @@ mod tests {
         let docker = command.process(&Host::Docker { container: "dev".into() });
         assert_eq!(docker.get_program(), "docker");
         assert_eq!(args(&docker), ["exec", "-i", "dev", "sh", "-c", line]);
+    }
+
+    /// `npm install -g` installs a CLI as `name.cmd`, which `std::process::Command` alone never
+    /// finds; one started through the shim has a tree of processes that killing has to end.
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_shim_is_found_and_its_whole_tree_killed() {
+        use std::io::Read;
+
+        let directory = tempfile::tempdir().unwrap();
+        let shim = directory.path().join("tool.cmd");
+        // `ping` stands in for the `node` a real shim starts: a child that outlives `cmd.exe`.
+        std::fs::write(&shim, "@echo off\r\necho started\r\nping -n 60 127.0.0.1 >nul\r\n")
+            .unwrap();
+        let program = directory.path().join("tool");
+        assert_eq!(locate(&program.to_string_lossy()), Some(shim.clone()));
+        assert_eq!(locate(&shim.to_string_lossy()), Some(shim));
+        assert_eq!(locate(&directory.path().join("absent").to_string_lossy()), None);
+
+        let mut child = HostCommand::new(program.to_string_lossy())
+            .process(&Host::Local)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut first = [0; 7];
+        stdout.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"started");
+        kill_tree(&mut child).unwrap();
+        // The output ends only once `ping`, which holds it too, is gone.
+        let started = std::time::Instant::now();
+        stdout.read_to_end(&mut Vec::new()).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        child.wait().unwrap();
     }
 
     #[test]

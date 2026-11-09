@@ -57,14 +57,7 @@ impl Providers {
 
     /// Looks for every CLI on `host` and keeps what it found.
     fn scan(&self, host: &Host) -> Vec<ProviderStatus> {
-        let names = ProviderKind::ALL.map(ProviderKind::executable).join(" ");
-        // One round trip for all of them: each found CLI prints its name, path and version.
-        let script = format!(
-            "for name in {names}; do path=$(command -v \"$name\") && \
-             printf '%s\\t%s\\t%s\\n' \"$name\" \"$path\" \
-             \"$(\"$name\" --version 2>/dev/null </dev/null | head -n 1)\"; done; true"
-        );
-        let found = HostCommand::new("sh").args(["-c", &script]).run(host).unwrap_or_default();
+        let found = find(host);
         let running = self.running.lock().expect("providers lock").clone();
         let statuses: Vec<ProviderStatus> = ProviderKind::ALL
             .into_iter()
@@ -147,4 +140,32 @@ impl Providers {
         });
         Ok(Reply::Done)
     }
+}
+
+/// One line per CLI found on `host`: its name, path and the first line of its `--version`,
+/// separated by tabs.
+fn find(host: &Host) -> String {
+    // Windows has no `sh` of its own (Git's is rarely on `PATH`), so look on this machine
+    // directly, finding `.cmd` shims as its shell does.
+    #[cfg(windows)]
+    if *host == Host::Local {
+        return ProviderKind::ALL
+            .into_iter()
+            .filter_map(|provider| {
+                let name = provider.executable();
+                let path = maestro_host::locate(name)?;
+                let version = HostCommand::new(name).arg("--version").run(host).unwrap_or_default();
+                let version = version.lines().next().unwrap_or_default().trim().to_owned();
+                Some(format!("{name}\t{}\t{version}\n", path.display()))
+            })
+            .collect();
+    }
+    let names = ProviderKind::ALL.map(ProviderKind::executable).join(" ");
+    // One round trip for all of them: each found CLI prints its name, path and version.
+    let script = format!(
+        "for name in {names}; do path=$(command -v \"$name\") && \
+         printf '%s\t%s\t%s\n' \"$name\" \"$path\" \
+         \"$(\"$name\" --version 2>/dev/null </dev/null | head -n 1)\"; done; true"
+    );
+    HostCommand::new("sh").args(["-c", &script]).run(host).unwrap_or_default()
 }

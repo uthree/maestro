@@ -99,7 +99,7 @@ impl AgentSession {
                     }
                     Input::Stop => {
                         pump.stopping = true;
-                        pump.child.kill().ok();
+                        maestro_host::kill_tree(&mut pump.child).ok();
                     }
                     Input::Closed(reason) => {
                         let status = pump.child.wait().ok();
@@ -163,7 +163,8 @@ impl Pump {
     }
 }
 
-#[cfg(test)]
+// The session runs a shell script as its CLI, which needs a Unix shell.
+#[cfg(all(test, unix))]
 mod tests {
     use std::time::Duration;
 
@@ -186,15 +187,11 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"hello"}'
 "#,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script.to_string_lossy().into_owned()
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_session_pumps_a_real_process_through_its_adapter() {
         let directory =

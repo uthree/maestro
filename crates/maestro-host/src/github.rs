@@ -121,12 +121,45 @@ printf '%s\n' "$dir""#;
 /// A checkout of `repository` (`owner/name`) on `host`, cloned with `gh` the first time and
 /// brought up to date after that. Returns its directory.
 pub fn checkout(host: &Host, repository: &str) -> Result<PathBuf, HostError> {
+    // This machine may have no `sh` (Windows), or one that names directories its own way (Git's
+    // prints `/c/Users/…`), so here it is done directly.
+    if *host == Host::Local {
+        let home = crate::home_dir().ok_or_else(|| HostError::Unexpected {
+            program: "gh".into(),
+            message: "neither HOME nor USERPROFILE is set".into(),
+        })?;
+        return local_checkout(&home, repository);
+    }
     let output = HostCommand::new("sh").args(["-c", CHECKOUT, "sh", repository]).run(host)?;
     let directory = output.lines().map(str::trim).rfind(|line| !line.is_empty());
     directory.map(PathBuf::from).ok_or_else(|| HostError::Unexpected {
         program: "sh".into(),
         message: format!("no checkout directory in {output:?}"),
     })
+}
+
+/// [`CHECKOUT`] on this machine, under `home`.
+fn local_checkout(home: &Path, repository: &str) -> Result<PathBuf, HostError> {
+    let mut directory = home.join(".maestro").join("checkouts");
+    directory.extend(repository.split('/'));
+    if directory.join(".git").is_dir() {
+        let pulled = HostCommand::new("git")
+            .arg("-C")
+            .arg(directory.to_string_lossy())
+            .args(["pull", "--ff-only", "--quiet"])
+            .run(&Host::Local);
+        if pulled.is_err() {
+            eprintln!("could not bring {} up to date", directory.display());
+        }
+    } else {
+        // `git clone` makes the directories above the checkout.
+        HostCommand::new("gh")
+            .args(["repo", "clone", repository])
+            .arg(directory.to_string_lossy())
+            .args(["--", "--quiet"])
+            .run(&Host::Local)?;
+    }
+    Ok(directory)
 }
 
 /// `gh pr create` prints the new pull request's URL as its last line.
@@ -175,6 +208,21 @@ mod tests {
         assert_eq!(parse_created("nothing"), None);
     }
 
+    #[test]
+    fn an_existing_local_checkout_is_found_without_cloning() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".maestro").join("checkouts").join("o").join("r");
+        std::fs::create_dir_all(&directory).unwrap();
+        HostCommand::new("git")
+            .cwd(&directory)
+            .args(["init", "--quiet"])
+            .run(&Host::Local)
+            .unwrap();
+        assert_eq!(local_checkout(home.path(), "o/r").unwrap(), directory);
+    }
+
+    /// What another machine runs. Windows' only `sh` is Git's, which spells paths its own way.
+    #[cfg(unix)]
     #[test]
     fn an_existing_checkout_is_found_without_cloning() {
         let home = tempfile::tempdir().unwrap();

@@ -210,7 +210,8 @@ impl Drop for Client {
             // Closing stdin ends the daemon's read loop; kill covers a daemon that hangs.
             *self.writer.get_mut().expect("writer lock") = Box::new(io::sink());
             if !matches!(child.try_wait(), Ok(Some(_))) {
-                child.kill().ok();
+                // The daemon's agents with it: on Windows they would outlive it.
+                maestro_host::kill_tree(child).ok();
             }
             child.wait().ok();
         }
