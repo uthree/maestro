@@ -2,8 +2,8 @@
 //! plans is shown in the chat as a card and opens beside it on demand.
 
 use atelier::agent::{
-    ApprovalCard, AssistantMessage, ChatNotice, Composer, ReasoningBlock, ThinkingIndicator,
-    ToolCall, ToolGroup, UserMessage,
+    ApprovalCard, AssistantMessage, ChatNotice, Composer, MessageQueue, ReasoningBlock,
+    ThinkingIndicator, ToolCall, ToolGroup, UserMessage,
 };
 use atelier::{
     ActiveStrings, ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, CopyButton,
@@ -11,12 +11,13 @@ use atelier::{
     TextColor, TextSize, Tone,
 };
 use gpui::{
-    AnyElement, Context, Corner, ElementId, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, prelude::*, px,
+    AnyElement, Context, Corner, ElementId, Entity, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, prelude::*, px,
 };
+use gpui_component::input::InputState;
 use maestro_client::mirror::{AgentView, Entry, ToolState};
 use maestro_core::{AgentId, ModelChoice, NodeStatus, PermissionKind, ProviderKind, Workflow};
-use maestro_protocol::AgentStatus;
+use maestro_protocol::{AgentStatus, Command, QueueEdit};
 
 use crate::app::{Maestro, Progress};
 use crate::dropdown::{self, Menu};
@@ -255,23 +256,52 @@ impl Maestro {
                     .into_any_element(),
             );
         }
-        // Sent during the turn; the agent reads them when it ends.
-        for (index, text) in view.transcript.queued.iter().enumerate() {
-            let key: SharedString = format!("{agent}-queued-{index}").into();
-            rows.push(
-                UserMessage::new(text.clone()).id(element("queued", &key)).into_any_element(),
-            );
-        }
-        if !view.transcript.queued.is_empty() {
-            rows.push(
-                ChatNotice::status(tr(
-                    "Sends when the current reply ends",
-                    "現在の返答が終わったら送信します",
-                ))
-                .into_any_element(),
-            );
-        }
         rows
+    }
+
+    /// The messages sent during a turn, waiting for it to end, between the transcript and the
+    /// composer that holds `field`: each can be sent now, taken back into the composer, or
+    /// dropped, and the whole queue paused. `None` while nothing waits.
+    pub(crate) fn waiting_messages(
+        &self,
+        agent: AgentId,
+        view: &AgentView,
+        field: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Option<MessageQueue> {
+        let transcript = &view.transcript;
+        if transcript.queued.is_empty() {
+            return None;
+        }
+        let edit = |edit: fn(usize) -> QueueEdit| {
+            cx.listener(move |this, index: &usize, _, cx| {
+                this.command(Command::EditQueue { agent, edit: edit(*index) }, cx);
+            })
+        };
+        let take_back = {
+            let (field, queued) = (field.clone(), transcript.queued.clone());
+            cx.listener(move |this, index: &usize, window, cx| {
+                let Some(text) = queued.get(*index) else { return };
+                input::set(&field, text, window, cx);
+                let edit = QueueEdit::Remove { index: *index };
+                this.command(Command::EditQueue { agent, edit }, cx);
+            })
+        };
+        Some(
+            MessageQueue::new(SharedString::from(format!("queue-{agent}")))
+                .messages(transcript.queued.iter().cloned())
+                .paused(transcript.paused)
+                // Taking one back would overwrite what is being written.
+                .editable(input::text(field, cx).is_empty())
+                .disabled(view.status == AgentStatus::Exited)
+                .on_pause(cx.listener(move |this, paused: &bool, _, cx| {
+                    let edit = QueueEdit::Pause { paused: *paused };
+                    this.command(Command::EditQueue { agent, edit }, cx);
+                }))
+                .on_send_now(edit(|index| QueueEdit::SendNow { index }))
+                .on_edit(take_back)
+                .on_remove(edit(|index| QueueEdit::Remove { index })),
+        )
     }
 
     /// A workflow the commander planned, as a card in the conversation: its steps and where
@@ -559,9 +589,11 @@ impl Maestro {
         }
         let grew = self.chat_length != length;
         self.chat_length = length;
-        // While a reply streams, every frame, so it stays in view as its row grows; otherwise
-        // only on a new row, so a selection dragged up past the edge is not pulled back.
-        if self.chat_following && (grew || busy) {
+        // While a reply streams, every frame, so it stays in view as its row grows, and once
+        // more as it ends, for the last of it; otherwise only on a new row, so a selection
+        // dragged up past the edge is not pulled back.
+        let ended = std::mem::replace(&mut self.chat_was_busy, busy) && !busy;
+        if self.chat_following && (grew || busy || ended) {
             self.chat_scroll.scroll_to_bottom();
         }
         let empty = rows.is_empty();
@@ -596,6 +628,9 @@ impl Maestro {
                     cx.notify();
                 }))
             });
+        let waiting = view.as_ref().and_then(|(agent, view)| {
+            self.waiting_messages(*agent, view, &self.fields.composer, cx)
+        });
         // The picker opens upward from the composer's bottom row, over the transcript.
         let menu = (fresh && self.menu == Some(Menu::Commander)).then(|| {
             div().absolute().bottom(px(42.)).left(px(44.)).child(dropdown::floating(
@@ -696,6 +731,7 @@ impl Maestro {
                             .flex_col()
                             .w_full()
                             .max_w(px(READING_WIDTH))
+                            .children(waiting)
                             .child(composer)
                             .children(menu),
                     ),

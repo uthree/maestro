@@ -101,6 +101,11 @@ pub fn text(state: &Entity<InputState>, cx: &App) -> String {
     state.read(cx).value().trim_end_matches('\n').to_owned()
 }
 
+/// Puts `text` in a field, the caret at its end.
+pub fn set(state: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut App) {
+    state.update(cx, |state, cx| state.set_value(text.to_owned(), window, cx));
+}
+
 /// Empties a field.
 pub fn clear(state: &Entity<InputState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |state, cx| state.set_value("", window, cx));

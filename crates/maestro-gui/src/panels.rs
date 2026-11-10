@@ -825,6 +825,7 @@ impl Maestro {
         let role = if lead { tr("lead", "リード") } else { tr("worker", "ワーカー") };
         let busy = view.transcript.busy;
         let provider = view.spec.model.provider;
+        let waiting = self.waiting_messages(agent, view, &self.fields.node_message, cx);
         div()
             .flex()
             .flex_col()
@@ -850,8 +851,14 @@ impl Maestro {
             )
             .when(reply, |worker| {
                 worker.child(
-                    div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(
-                        input::stretch(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .px(theme.spacing.sm)
+                        .pb(theme.spacing.sm)
+                        .children(waiting)
+                        .child(input::stretch(
                             width - theme.spacing.sm * 2.,
                             Composer::new("worker-composer")
                                 .input({
@@ -874,8 +881,7 @@ impl Maestro {
                                 .on_stop(
                                     cx.listener(move |this, _, _, cx| this.interrupt(agent, cx)),
                                 ),
-                        ),
-                    ),
+                        )),
                 )
             })
     }
