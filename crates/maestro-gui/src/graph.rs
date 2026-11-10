@@ -1,21 +1,22 @@
-//! The workflow canvas: nodes laid out in columns by dependency, wires from each node to the
-//! nodes waiting for it, and the pointer gestures that edit the graph.
+//! The workflow canvas: Atelier's `NodeCanvas`, filled from the workflow in the mirror.
 //!
-//! Composed on a gpui `canvas` the way Atelier's node-editor example is. A workflow has one kind
-//! of wire, "waits for", so every port shares the first port colour and the legend names it.
-//! Where a node sits is this window's own business: the daemon's graph has no positions, so the
-//! layout comes from [`Workflow::depths`] and a node the user drags keeps its place here.
+//! A workflow has one kind of wire, "waits for", into an input that takes many wires, so every
+//! port shares the first port colour and the legend names it. The canvas applies a gesture at
+//! once and reports it; the report becomes a command, and the daemon's answer comes back as a
+//! changed workflow that the canvas is filled from again. Where a node sits is this window's own
+//! business: the daemon's graph has no positions, so the layout comes from [`Workflow::depths`]
+//! and a node the user drags keeps its place here.
 
 use std::collections::HashMap;
 
+use atelier::graph::{GraphNode, NodeCanvas, NodeCanvasEvent, NodeId as CanvasId, NodeState};
 use atelier::{
-    ActiveTheme, Badge, Button, ButtonVariant, ControlSize, Divider, EmptyState, Icon, IconName,
-    Label, ProgressBar, Spinner, StatusDot, TextColor, TextSize, Theme, Tone, Tooltip,
+    ActiveTheme, Badge, Button, ButtonVariant, ControlSize, Divider, EmptyState, IconName, Label,
+    StatusDot, TextColor, TextSize, Tone,
 };
 use gpui::{
-    Bounds, Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, PathBuilder, Pixels, Point, ScrollWheelEvent, Styled, canvas, div, fill, point,
-    prelude::*, px, size,
+    AnyElement, App, Context, Entity, IntoElement, ParentElement, Pixels, Point, Styled, div,
+    point, prelude::*, px,
 };
 use maestro_core::{
     ModelChoice, Node, NodeEdit, NodeId, NodeOrigin, NodeStatus, Workflow, WorkflowId,
@@ -30,64 +31,62 @@ const NODE_WIDTH: f32 = 248.;
 /// Horizontal distance between the left edges of two columns.
 const COLUMN: f32 = NODE_WIDTH + 104.;
 /// Vertical distance between the tops of two nodes in one column.
-const ROW: f32 = 156.;
-/// Where the graph starts before the user pans.
-const ORIGIN: (f32, f32) = (40., 48.);
-/// The pointer's target around a port.
-const HIT: f32 = 18.;
+const ROW: f32 = 196.;
 
-/// What the pointer is doing on the canvas.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Drag {
-    /// Nothing.
-    #[default]
-    None,
-    /// Panning, from this pointer position.
-    Pan(Point<Pixels>),
-    /// Moving a node, from this pointer position.
-    Node(NodeId, Point<Pixels>),
-    /// A wire from a node's output, following the pointer (window coordinates).
-    Wire {
-        /// The node the dependents will wait for.
-        from: NodeId,
-        /// Where the pointer is.
-        cursor: Point<Pixels>,
-    },
-}
-
-/// The canvas's view state.
-#[derive(Debug)]
+/// The canvas and what this window keeps about it.
 pub struct Canvas {
-    /// How far the graph is panned.
-    pub pan: Point<Pixels>,
+    /// Atelier's canvas, which draws the graph and takes the gestures.
+    pub view: Entity<NodeCanvas>,
     /// Nodes the user moved, or that were added where the user could see them.
     placed: HashMap<(WorkflowId, NodeId), Point<Pixels>>,
-    /// The gesture under way.
-    pub drag: Drag,
-}
-
-impl Default for Canvas {
-    fn default() -> Self {
-        Self { pan: point(px(ORIGIN.0), px(ORIGIN.1)), placed: HashMap::new(), drag: Drag::None }
-    }
+    /// The workflow the canvas was last filled from.
+    shown: Option<Workflow>,
+    /// The canvas's id for each node of [`Canvas::shown`], and back.
+    ids: HashMap<NodeId, CanvasId>,
+    nodes: HashMap<CanvasId, NodeId>,
+    /// Whether to pan back to the start the next time the canvas is shown.
+    reset: bool,
 }
 
 impl Canvas {
+    /// An empty canvas, whose gestures `Maestro` hears.
+    pub fn new(cx: &mut Context<Maestro>) -> Self {
+        let view = cx.new(|_| {
+            NodeCanvas::new("workflow").port_types([tr("Waits for", "待機関係")]).without_legend()
+        });
+        cx.subscribe(&view, |this: &mut Maestro, _, event: &NodeCanvasEvent, cx| {
+            this.canvas_event(event, cx)
+        })
+        .detach();
+        Self {
+            view,
+            placed: HashMap::new(),
+            shown: None,
+            ids: HashMap::new(),
+            nodes: HashMap::new(),
+            reset: false,
+        }
+    }
+
     /// Back to the start of the graph.
-    pub fn reset(&mut self) {
-        self.pan = point(px(ORIGIN.0), px(ORIGIN.1));
-        self.drag = Drag::None;
+    pub fn reset(&mut self, cx: &mut App) {
+        self.view.update(cx, |canvas, cx| canvas.reset_view(cx));
+    }
+
+    /// Back to the start of the graph the next time it is shown.
+    pub fn reset_later(&mut self) {
+        self.reset = true;
     }
 
     /// Puts a new node near the top-left of what is visible.
-    pub fn place_new(&mut self, workflow: WorkflowId, node: NodeId) {
+    pub fn place_new(&mut self, workflow: WorkflowId, node: NodeId, cx: &App) {
         let step = (node.0 % 6) as f32 * 24.;
-        let at = point(px(120. + step), px(80. + step)) - self.pan;
+        let at = point(px(120. + step), px(80. + step)) - self.view.read(cx).pan();
         self.placed.insert((workflow, node), at);
     }
 
     /// Where every node of `flow` sits, before panning.
-    pub fn layout(&self, flow: &Workflow) -> HashMap<NodeId, Point<Pixels>> {
+    fn layout(&self, flow: &Workflow) -> HashMap<NodeId, Point<Pixels>> {
         let depths = flow.depths();
         let mut rows: HashMap<usize, usize> = HashMap::new();
         flow.topological_order()
@@ -102,27 +101,123 @@ impl Canvas {
             .collect()
     }
 
-    fn moved(&mut self, workflow: WorkflowId, node: NodeId, to: Point<Pixels>) {
-        self.placed.insert((workflow, node), to);
+    /// Fills the canvas from `flow` when it changed since the last time, and selects `selected`.
+    pub fn show(&mut self, flow: Option<&Workflow>, selected: Option<NodeId>, cx: &mut App) {
+        if std::mem::take(&mut self.reset) {
+            self.reset(cx);
+        }
+        if self.shown.as_ref() != flow {
+            self.shown = flow.cloned();
+            let layout = flow.map(|flow| self.layout(flow)).unwrap_or_default();
+            let (old, mut ids) = (std::mem::take(&mut self.nodes), HashMap::new());
+            self.view.update(cx, |canvas, cx| {
+                for id in old.into_keys() {
+                    canvas.remove(id, cx);
+                }
+                let Some(flow) = flow else { return };
+                for node in flow.nodes() {
+                    let at = layout.get(&node.id).copied().unwrap_or_default();
+                    ids.insert(node.id, canvas.add(graph_node(node, at), cx));
+                }
+                for edge in flow.edges() {
+                    if let (Some(from), Some(to)) = (ids.get(&edge.from), ids.get(&edge.to)) {
+                        canvas.connect(atelier::graph::Wire::new(*from, 0, *to, 0), cx);
+                    }
+                }
+            });
+            self.nodes = ids.iter().map(|(node, id)| (*id, *node)).collect();
+            self.ids = ids;
+        }
+        let wanted = selected.and_then(|node| self.ids.get(&node).copied());
+        if self.view.read(cx).selected() != wanted {
+            self.view.update(cx, |canvas, cx| canvas.select(wanted, cx));
+        }
+    }
+
+    /// The workflow's node the canvas calls `id`.
+    fn node(&self, id: CanvasId) -> Option<NodeId> {
+        self.nodes.get(&id).copied()
     }
 }
 
-/// Where the ports sit on a node, so wires can be drawn without measuring the nodes.
-struct Geometry {
-    header: Pixels,
+/// How the canvas shows a node's status.
+fn state(node: &Node) -> NodeState {
+    match node.status {
+        NodeStatus::Pending => NodeState::Idle,
+        NodeStatus::Running => NodeState::Working,
+        NodeStatus::AwaitingUser => NodeState::NeedsAnswer,
+        NodeStatus::AwaitingChoice => NodeState::NeedsChoice,
+        NodeStatus::Succeeded => NodeState::Done(None),
+        NodeStatus::Failed => NodeState::Failed,
+    }
 }
 
-impl Geometry {
-    fn new(theme: &Theme) -> Self {
-        Self { header: theme.density.row + px(6.) }
-    }
+/// A step the commander planned is the AI's draft until the user keeps it or it runs.
+fn draft(node: &Node) -> bool {
+    node.origin == NodeOrigin::Commander && node.status == NodeStatus::Pending
+}
 
-    /// The centre of a node's input (on the left) or output (on the right), before panning.
-    /// The extra pixel is the node's border.
-    fn port(&self, at: Point<Pixels>, output: bool) -> Point<Pixels> {
-        let x = if output { at.x + px(NODE_WIDTH) } else { at.x };
-        point(x, at.y + px(1.) + self.header / 2.)
-    }
+/// A workflow node as the canvas draws it: its title and status in the header, the wire ports,
+/// then its difficulty, model, first line of instructions and branch.
+fn graph_node(node: &Node, at: Point<Pixels>) -> GraphNode {
+    let difficulty = node.difficulty.map(i18n::difficulty);
+    let delegate = node.delegate;
+    let model = model_label(node);
+    let instructions: String = if node.instructions.is_empty() {
+        tr("No instructions yet", "指示はまだありません").into()
+    } else {
+        node.instructions.lines().next().unwrap_or_default().into()
+    };
+    let branch = node.branch.clone();
+    GraphNode::new(node.title.clone())
+        .at(f32::from(at.x), f32::from(at.y))
+        .width(px(NODE_WIDTH))
+        .input_many(tr("Waits for", "待機先"), 0)
+        .output(tr("Then", "次へ"), 0)
+        .state(state(node))
+        .by_agent(draft(node))
+        .body(move |_, _, cx| {
+            let theme = cx.theme();
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme.spacing.xs)
+                .px(theme.spacing.md)
+                .py(theme.spacing.sm)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme.spacing.sm)
+                        .children(difficulty.map(Badge::new))
+                        // A lead plans it as a workflow of its own.
+                        .when(delegate, |row| {
+                            row.child(Badge::new(tr("Lead", "リード")).icon(IconName::Sliders))
+                        })
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Label::new(model.clone())
+                                    .size(TextSize::XSmall)
+                                    .color(TextColor::Muted)
+                                    .truncate(),
+                            ),
+                        ),
+                )
+                .child(
+                    Label::new(instructions.clone())
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Faint)
+                        .truncate(),
+                )
+                .children(branch.clone().map(|branch| {
+                    Label::new(branch)
+                        .size(TextSize::XSmall)
+                        .mono()
+                        .color(TextColor::Faint)
+                        .truncate()
+                }))
+                .into_any_element()
+        })
 }
 
 /// A status in words and a mark, never colour alone.
@@ -170,387 +265,42 @@ pub fn choice_label(choice: &ModelChoice) -> String {
 }
 
 impl Maestro {
-    // Pointer handling.
-
-    fn canvas_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        if event.button == MouseButton::Left {
-            self.select(None);
-        }
-        self.canvas.drag = Drag::Pan(event.position);
-        cx.notify();
-    }
-
-    fn canvas_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if event.pressed_button.is_none() {
-            // The button came up outside the window.
-            if self.canvas.drag != Drag::None {
-                self.canvas.drag = Drag::None;
-                cx.notify();
-            }
-            return;
-        }
-        match self.canvas.drag {
-            Drag::None => return,
-            Drag::Pan(last) => {
-                self.canvas.pan += event.position - last;
-                self.canvas.drag = Drag::Pan(event.position);
-            }
-            Drag::Node(id, last) => {
-                if let Some(flow) = self.current() {
-                    let workflow = flow.id;
-                    if let Some(at) = self.canvas.layout(flow).get(&id).copied() {
-                        self.canvas.moved(workflow, id, at + (event.position - last));
-                    }
+    /// What the person did on the canvas, which has already applied it, as a command.
+    fn canvas_event(&mut self, event: &NodeCanvasEvent, cx: &mut Context<Self>) {
+        let node = |id| self.canvas.node(id);
+        match *event {
+            NodeCanvasEvent::Selected(id) => self.select(id.and_then(node)),
+            NodeCanvasEvent::Moved(id) => {
+                let (Some(workflow), Some(moved)) = (self.workflow, node(id)) else { return };
+                if let Some(at) = self.canvas.view.read(cx).node(id).map(|node| node.position) {
+                    self.canvas.placed.insert((workflow, moved), at);
                 }
-                self.canvas.drag = Drag::Node(id, event.position);
             }
-            Drag::Wire { from, .. } => {
-                self.canvas.drag = Drag::Wire { from, cursor: event.position };
+            NodeCanvasEvent::Connected(wire) => {
+                if let (Some(from), Some(to)) = (node(wire.from), node(wire.to)) {
+                    self.connect_nodes(from, to, cx);
+                }
             }
+            NodeCanvasEvent::Disconnected(wire) => {
+                if let (Some(from), Some(to)) = (node(wire.from), node(wire.to)) {
+                    self.disconnect_nodes(from, to, cx);
+                }
+            }
+            // The canvas wires an undone draft's neighbours together; the daemon only removes
+            // it, and the canvas is filled again from what it says.
+            NodeCanvasEvent::Removed(id) | NodeCanvasEvent::Undone(id) => {
+                if let Some(removed) = node(id) {
+                    self.remove_node(removed, cx);
+                }
+            }
+            NodeCanvasEvent::Kept(id) => {
+                if let Some(kept) = node(id) {
+                    self.edit_node(kept, NodeEdit::default(), cx);
+                }
+            }
+            NodeCanvasEvent::CommentPressed { .. } => {}
         }
         cx.notify();
-    }
-
-    fn canvas_mouse_up(&mut self, cx: &mut Context<Self>) {
-        // A wire let go anywhere but on an input is dropped.
-        self.canvas.drag = Drag::None;
-        cx.notify();
-    }
-
-    fn canvas_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        self.canvas.pan += event.delta.pixel_delta(px(20.));
-        cx.notify();
-    }
-
-    // Drawing.
-
-    fn socket(
-        &self,
-        node: &Node,
-        output: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let id = node.id;
-        let color = theme.colors.ports[0];
-        let flow = self.current();
-        let connected = flow.is_some_and(|flow| {
-            flow.edges().any(|edge| if output { edge.from == id } else { edge.to == id })
-        });
-        // While a wire is held, the node it comes from steps back: it cannot wait for itself.
-        let compatible = match self.canvas.drag {
-            Drag::Wire { from, .. } => output || from != id,
-            _ => true,
-        };
-        let offset = -(px(1.) + px(HIT / 2.));
-        let header = Geometry::new(theme).header;
-        let tooltip = if output {
-            tr("Steps that wait for this one", "このステップを待つステップ")
-        } else {
-            tr("Waits for", "待機先")
-        };
-        div()
-            .id((if output { "out" } else { "in" }, id.0 as usize))
-            .absolute()
-            .top((header - px(HIT)) / 2.)
-            .when(output, |hit| hit.right(offset))
-            .when(!output, |hit| hit.left(offset))
-            .size(px(HIT))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_crosshair()
-            .opacity(if compatible { 1. } else { 0.3 })
-            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-            .child(
-                div()
-                    .size(px(10.))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(color)
-                    .bg(if connected { color } else { theme.colors.elevated }),
-            )
-            .when(output, |hit| {
-                hit.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.canvas.drag = Drag::Wire { from: id, cursor: event.position };
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-            })
-            .when(!output, |hit| {
-                hit.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                        if let Drag::Wire { from, .. } = this.canvas.drag {
-                            this.connect_nodes(from, id, cx);
-                        }
-                        this.canvas.drag = Drag::None;
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-            })
-    }
-
-    fn state_mark(node: &Node, theme: &Theme) -> impl IntoElement + use<> {
-        let mark = div().flex().flex_none().items_center().gap(theme.spacing.xs);
-        let word = |text: &'static str, color: TextColor| {
-            Label::new(text).size(TextSize::XSmall).color(color)
-        };
-        match node.status {
-            NodeStatus::Pending if node.origin == NodeOrigin::Commander => {
-                mark.child(Icon::new(IconName::Sparkles).size(px(12.)).color(theme.colors.agent))
-            }
-            NodeStatus::Pending => mark,
-            NodeStatus::Running => {
-                mark.child(word(status_label(node.status), TextColor::Muted)).child(
-                    Spinner::new(("node-spinner", node.id.0 as usize))
-                        .size(px(12.))
-                        .color(theme.colors.accent),
-                )
-            }
-            NodeStatus::AwaitingUser => mark
-                .child(word(status_label(node.status), TextColor::Warning))
-                .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.warning)),
-            NodeStatus::AwaitingChoice => mark
-                .child(word(status_label(node.status), TextColor::Warning))
-                .child(Icon::new(IconName::Eye).size(px(12.)).color(theme.colors.warning)),
-            NodeStatus::Succeeded => mark
-                .child(word(status_label(node.status), TextColor::Faint))
-                .child(Icon::new(IconName::Check).size(px(12.)).color(theme.colors.success)),
-            NodeStatus::Failed => mark
-                .child(word(status_label(node.status), TextColor::Danger))
-                .child(Icon::new(IconName::Alert).size(px(12.)).color(theme.colors.danger)),
-        }
-    }
-
-    fn render_node(
-        &self,
-        node: &Node,
-        at: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = cx.theme().clone();
-        let geometry = Geometry::new(&theme);
-        let id = node.id;
-        let selected = self.selected == Some(id);
-        let dragging = matches!(self.canvas.drag, Drag::Node(dragged, _) if dragged == id);
-        // A step the commander planned is the AI's draft until the user keeps it or it runs.
-        let draft = node.origin == NodeOrigin::Commander && node.status == NodeStatus::Pending;
-        let border = match node.status {
-            _ if draft => theme.colors.agent,
-            NodeStatus::AwaitingUser | NodeStatus::AwaitingChoice => theme.colors.warning,
-            NodeStatus::Failed => theme.colors.danger,
-            NodeStatus::Running => theme.colors.accent,
-            _ if selected => theme.colors.accent,
-            _ => theme.colors.border_strong,
-        };
-        let inner = Theme::concentric(theme.shape.radius_md, px(1.));
-
-        let header = div()
-            .relative()
-            .h(geometry.header)
-            .flex()
-            .items_center()
-            .gap(theme.spacing.sm)
-            .px(theme.spacing.md)
-            .rounded_t(inner)
-            .border_b_1()
-            .border_color(theme.colors.separator)
-            .when(selected, |header| header.bg(theme.colors.selected))
-            .child(
-                div().flex_1().min_w_0().child(
-                    Label::new(node.title.clone())
-                        .size(TextSize::Small)
-                        .weight(theme.typography.label_weight)
-                        .truncate(),
-                ),
-            )
-            .child(Self::state_mark(node, &theme))
-            .child(self.socket(node, false, cx))
-            .child(self.socket(node, true, cx));
-
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(theme.spacing.xs)
-            .px(theme.spacing.md)
-            .py(theme.spacing.sm)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.spacing.sm)
-                    .children(
-                        node.difficulty.map(|difficulty| Badge::new(i18n::difficulty(difficulty))),
-                    )
-                    // A lead plans it as a workflow of its own.
-                    .when(node.delegate, |row| {
-                        row.child(Badge::new(tr("Lead", "リード")).icon(IconName::Sliders))
-                    })
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Label::new(model_label(node))
-                                .size(TextSize::XSmall)
-                                .color(TextColor::Muted)
-                                .truncate(),
-                        ),
-                    ),
-            )
-            .child(
-                Label::new(if node.instructions.is_empty() {
-                    tr("No instructions yet", "指示はまだありません").to_string()
-                } else {
-                    node.instructions.lines().next().unwrap_or_default().to_string()
-                })
-                .size(TextSize::XSmall)
-                .color(TextColor::Faint)
-                .truncate(),
-            )
-            .children(node.branch.clone().map(|branch| {
-                Label::new(branch).size(TextSize::XSmall).mono().color(TextColor::Faint).truncate()
-            }));
-
-        div()
-            .id(("node", id.0 as usize))
-            .absolute()
-            .left(self.canvas.pan.x + at.x)
-            .top(self.canvas.pan.y + at.y)
-            .w(px(NODE_WIDTH))
-            .flex()
-            .flex_col()
-            .rounded(theme.shape.radius_md)
-            .bg(theme.colors.elevated)
-            .border_1()
-            .border_color(border)
-            .when(draft, |node| node.border_dashed())
-            .shadow(if dragging {
-                theme.elevation.medium.clone()
-            } else {
-                theme.elevation.low.clone()
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.select(Some(id));
-                    this.canvas.drag = Drag::Node(id, event.position);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(header)
-            .when(node.status == NodeStatus::Running, |node_box| {
-                node_box.child(
-                    ProgressBar::indeterminate(("node-progress", id.0 as usize)).height(px(2.)),
-                )
-            })
-            .child(body)
-            .when(draft, |node_box| {
-                node_box.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.spacing.sm)
-                        .px(theme.spacing.md)
-                        .py(theme.spacing.sm)
-                        .rounded_b(inner)
-                        .border_t_1()
-                        .border_color(theme.colors.separator)
-                        .bg(theme.colors.agent_wash)
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                Label::new(tr("Draft", "下書き"))
-                                    .size(TextSize::XSmall)
-                                    .color(TextColor::Agent)
-                                    .truncate(),
-                            ),
-                        )
-                        .child(
-                            Button::new(("undo-node", id.0 as usize), tr("Remove", "削除"))
-                                .ghost()
-                                .size(ControlSize::Small)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.remove_node(id, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new(("keep-node", id.0 as usize), tr("Keep", "採用"))
-                                .size(ControlSize::Small)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.edit_node(id, NodeEdit::default(), cx);
-                                })),
-                        ),
-                )
-            })
-    }
-
-    /// The dot grid and the wires, painted under the nodes.
-    fn wires(
-        &self,
-        flow: &Workflow,
-        layout: &HashMap<NodeId, Point<Pixels>>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let geometry = Geometry::new(theme);
-        let pan = self.canvas.pan;
-        let color = theme.colors.ports[0];
-        let wires: Vec<_> = flow
-            .edges()
-            .filter_map(|edge| {
-                let strong = self.selected == Some(edge.from) || self.selected == Some(edge.to);
-                Some((
-                    pan + geometry.port(*layout.get(&edge.from)?, true),
-                    pan + geometry.port(*layout.get(&edge.to)?, false),
-                    strong,
-                ))
-            })
-            .collect();
-        let pending = match self.canvas.drag {
-            Drag::Wire { from, cursor } => {
-                layout.get(&from).map(|at| (pan + geometry.port(*at, true), cursor))
-            }
-            _ => None,
-        };
-        let dot = theme.colors.grid;
-        let spacing = px(24.);
-        canvas(
-            |_, _, _| {},
-            move |bounds: Bounds<Pixels>, _, window, _| {
-                let origin = bounds.origin;
-                let mut y = pan.y % spacing;
-                while y < bounds.size.height {
-                    let mut x = pan.x % spacing;
-                    while x < bounds.size.width {
-                        window.paint_quad(fill(
-                            Bounds::new(origin + point(x, y), size(px(1.5), px(1.5))),
-                            dot,
-                        ));
-                        x += spacing;
-                    }
-                    y += spacing;
-                }
-                for (from, to, strong) in &wires {
-                    let width = if *strong { px(3.) } else { px(2.) };
-                    if let Some(path) = bezier(origin + *from, origin + *to, width) {
-                        window.paint_path(path, if *strong { color } else { color.opacity(0.75) });
-                    }
-                }
-                if let Some((from, cursor)) = pending
-                    && let Some(path) = bezier(origin + from, cursor, px(2.))
-                {
-                    window.paint_path(path, color);
-                }
-            },
-        )
-        .size_full()
     }
 
     fn legend(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -580,10 +330,7 @@ impl Maestro {
                 Button::new("reset-view", tr("Reset view", "表示をリセット"))
                     .ghost()
                     .size(ControlSize::Small)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.canvas.reset();
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.canvas.reset(cx))),
             )
             .child(Divider::vertical())
             .child(
@@ -594,8 +341,8 @@ impl Maestro {
                     .child(StatusDot::new(theme.colors.ports[0]))
                     .child(
                         Label::new(tr(
-                            "Waits for · drag from a step's right edge to another step",
-                            "待機関係 · ステップの右端から別のステップへドラッグ",
+                            "Waits for · drag from a step's “Then” to another step's “Waits for”",
+                            "待機関係 · ステップの「次へ」から別のステップの「待機先」へドラッグ",
                         ))
                         .size(TextSize::XSmall)
                         .color(TextColor::Muted),
@@ -603,24 +350,19 @@ impl Maestro {
             )
     }
 
+    /// Fills the canvas from the workflow on screen, before a frame is drawn.
+    pub(crate) fn show_graph(&mut self, cx: &mut Context<Self>) {
+        let flow = self.current().cloned();
+        self.canvas.show(flow.as_ref(), self.selected, cx);
+    }
+
     /// The canvas for the workflow on screen.
-    pub(crate) fn graph(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn graph(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(flow) = self.current().cloned() else {
+        let Some(flow) = self.current() else {
             return div().flex_1().into_any_element();
         };
-        let layout = self.canvas.layout(&flow);
-        // The selected node is drawn last, so it is on top while it is dragged.
-        let mut order: Vec<_> = flow.nodes().collect();
-        order.sort_by_key(|node| self.selected == Some(node.id));
-        let nodes: Vec<_> = order
-            .into_iter()
-            .filter_map(|node| {
-                let at = *layout.get(&node.id)?;
-                Some(self.render_node(node, at, cx).into_any_element())
-            })
-            .collect();
-        let empty = nodes.is_empty();
+        let empty = flow.nodes().next().is_none();
         div()
             .id("graph")
             .relative()
@@ -628,24 +370,7 @@ impl Maestro {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(theme.colors.background)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event, _, cx| this.canvas_mouse_down(event, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(|this, event, _, cx| this.canvas_mouse_down(event, cx)),
-            )
-            .on_mouse_move(cx.listener(|this, event, _, cx| this.canvas_mouse_move(event, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.canvas_mouse_up(cx)))
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(|this, _, _, cx| this.canvas_mouse_up(cx)),
-            )
-            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.canvas_scroll(event, cx)))
-            .child(div().absolute().inset_0().child(self.wires(&flow, &layout, cx)))
-            .children(nodes)
+            .child(div().absolute().inset_0().child(self.canvas.view.clone()))
             .when(empty, |graph| {
                 graph.child(
                     div().absolute().inset_0().flex().items_center().justify_center().child(
@@ -684,13 +409,4 @@ impl Maestro {
             .child(self.legend(cx))
             .into_any_element()
     }
-}
-
-/// A wire from an output to an input, leaving and entering horizontally.
-fn bezier(from: Point<Pixels>, to: Point<Pixels>, width: Pixels) -> Option<gpui::Path<Pixels>> {
-    let reach = ((to.x - from.x).abs() * 0.5).max(px(48.));
-    let mut builder = PathBuilder::stroke(width);
-    builder.move_to(from);
-    builder.cubic_bezier_to(to, point(from.x + reach, from.y), point(to.x - reach, to.y));
-    builder.build().ok()
 }

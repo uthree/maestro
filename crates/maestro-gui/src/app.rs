@@ -276,7 +276,7 @@ impl Maestro {
             menu: None,
             dialog: None,
             dialog_focus: cx.focus_handle(),
-            canvas: Canvas::default(),
+            canvas: Canvas::new(cx),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
             error: None,
@@ -533,7 +533,7 @@ impl Maestro {
         if self.workflow != Some(workflow) {
             self.workflow = Some(workflow);
             self.selected = None;
-            self.canvas.reset();
+            self.canvas.reset_later();
         }
     }
 
@@ -973,9 +973,9 @@ impl Maestro {
             origin: NodeOrigin::User,
             conversation: None,
         };
-        self.request(Command::AddNode { workflow, node }, cx, move |this, reply, _| {
+        self.request(Command::AddNode { workflow, node }, cx, move |this, reply, cx| {
             if let Reply::NodeAdded { node } = reply {
-                this.canvas.place_new(workflow, node);
+                this.canvas.place_new(workflow, node, cx);
                 this.select(Some(node));
             }
         });
@@ -1248,6 +1248,7 @@ impl Render for Maestro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fill_fields(window, cx);
         self.fill_project_name(window, cx);
+        self.show_graph(cx);
         if self.placeholders != i18n::lang() {
             self.placeholders = i18n::lang();
             self.fields.translate(window, cx);
