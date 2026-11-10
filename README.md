@@ -13,8 +13,8 @@ The plan is in [docs/plan.md](docs/plan.md) (Japanese).
 crates/maestro-core      domain model: providers, agents, workflow graphs, hosts, agent events — no I/O
 crates/maestro-protocol  commands, replies and events, framed as JSON lines
 crates/maestro-host      processes on a host (local or over `ssh`), git worktrees, `gh` pull requests
-crates/maestro-agents    adapters for Claude Code, Codex, Antigravity CLI and OpenCode, and the
-                         session that runs one as a worker
+crates/maestro-agents    runs Claude Code, Codex, Antigravity CLI and OpenCode as workers, on any
+                         host, through Atelier's `atelier-agents` adapters
 crates/maestro-daemon    owns all state; `serve` is the resident daemon, `--stdio` relays to it
 crates/maestro-client    connects a frontend in-process, to a local child, or over `ssh`, and
                          keeps the frontend's copy of the daemon's state

@@ -17,6 +17,8 @@ use maestro_protocol::{AgentStatus, Command, CommandError, Event, QueueEdit, Rep
 
 /// Holds its first turn open on a permission request, then answers every message at once.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
+read init
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"atelier-initialize","response":{}}}'
 read prompt
 echo '{"type":"system","subtype":"init"}'
 echo '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"true"}}}'

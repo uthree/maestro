@@ -44,6 +44,8 @@ fn fake_claude() -> String {
     ]}));
     format!(
         r##"#!/bin/sh
+read init
+echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"atelier-initialize","response":{{}}}}}}'
 hold() {{ mkdir "$MAESTRO_TEST_DIR/busy" 2>/dev/null || touch "$MAESTRO_TEST_DIR/overlap"; sleep 0.2; }}
 free() {{ rmdir "$MAESTRO_TEST_DIR/busy"; }}
 read prompt
