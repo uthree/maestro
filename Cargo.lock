@@ -496,7 +496,7 @@ dependencies = [
 [[package]]
 name = "atelier"
 version = "0.4.0"
-source = "git+https://github.com/uthree/design-language?rev=a3c5f69e1db8d19e7c70bf427250473c77208055#a3c5f69e1db8d19e7c70bf427250473c77208055"
+source = "git+https://github.com/uthree/design-language?rev=ea00dad96a12105836e963a20fd257e4cfc1a474#ea00dad96a12105836e963a20fd257e4cfc1a474"
 dependencies = [
  "gpui",
  "image",
@@ -511,7 +511,7 @@ dependencies = [
 [[package]]
 name = "atelier-agents"
 version = "0.4.0"
-source = "git+https://github.com/uthree/design-language?rev=a3c5f69e1db8d19e7c70bf427250473c77208055#a3c5f69e1db8d19e7c70bf427250473c77208055"
+source = "git+https://github.com/uthree/design-language?rev=ea00dad96a12105836e963a20fd257e4cfc1a474#ea00dad96a12105836e963a20fd257e4cfc1a474"
 dependencies = [
  "serde",
  "serde_json",
