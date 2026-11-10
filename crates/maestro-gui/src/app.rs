@@ -194,6 +194,8 @@ pub struct Maestro {
     pub(crate) chat_following: bool,
     /// Rows that arrived since the person scrolled away, counted on the jump button.
     pub(crate) chat_unseen: usize,
+    /// Whether a reply was streaming at the last frame, to follow it to its very end.
+    pub(crate) chat_was_busy: bool,
     pub(crate) sidebar_open: bool,
     /// The window's width at the last frame, which decides whether the conversation and the
     /// workflow fit side by side.
@@ -260,6 +262,7 @@ impl Maestro {
             chat_length: (None, 0),
             chat_following: true,
             chat_unseen: 0,
+            chat_was_busy: false,
             sidebar_open: true,
             window_width: px(0.),
             node_tab: 0,

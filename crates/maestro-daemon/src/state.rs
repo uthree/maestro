@@ -201,6 +201,7 @@ impl State {
             | Command::GetTranscript { .. }
             | Command::SendToAgent { .. }
             | Command::AnswerPermission { .. }
+            | Command::EditQueue { .. }
             | Command::InterruptAgent { .. }
             | Command::StopAgent { .. }
             | Command::PublishWorkspace { .. }

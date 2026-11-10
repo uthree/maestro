@@ -60,6 +60,15 @@ pub enum AgentEvent {
         /// The message.
         text: String,
     },
+    /// The person changed the waiting messages: took one back, moved one to the front, or
+    /// paused or resumed sending them. Maestro reports this, not the CLI, and it replaces what
+    /// was waiting.
+    QueueChanged {
+        /// The messages still waiting, first to be sent first.
+        queued: Vec<String>,
+        /// Whether nothing is sent when a turn ends until the queue resumes.
+        paused: bool,
+    },
     /// Part of the reply the user reads.
     Text {
         /// The new text.

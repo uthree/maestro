@@ -280,6 +280,8 @@ pub struct Transcript {
     pub busy: bool,
     /// Messages sent during a turn, oldest first, which the agent gets once the turn ends.
     pub queued: Vec<String>,
+    /// Whether the waiting messages stay waiting when a turn ends, until the person resumes.
+    pub paused: bool,
     /// Where the current turn's entries start.
     turn: usize,
 }
@@ -343,6 +345,10 @@ impl Transcript {
         match event {
             AgentEvent::Started => {}
             AgentEvent::Queued { text } => self.queued.push(text.clone()),
+            AgentEvent::QueueChanged { queued, paused } => {
+                self.queued.clone_from(queued);
+                self.paused = *paused;
+            }
             AgentEvent::Prompted { text } => {
                 if let Some(index) = self.queued.iter().position(|queued| queued == text) {
                     self.queued.remove(index);
@@ -417,6 +423,7 @@ impl Transcript {
                 self.close_permissions(false);
                 self.busy = false;
                 self.queued.clear();
+                self.paused = false;
                 self.finish_turn();
                 self.entries.push(Entry::Exited(reason.clone()));
             }

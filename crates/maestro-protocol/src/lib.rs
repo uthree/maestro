@@ -23,7 +23,7 @@ use thiserror::Error;
 
 /// Bumped whenever a message changes shape. The daemon announces it first; a frontend that
 /// disagrees disconnects instead of misreading.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Pairs a response with the request it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -295,6 +295,14 @@ pub enum Command {
         /// Allow, or refuse.
         allow: bool,
     },
+    /// Changes the messages waiting for an agent's turn to end ([`AgentEvent::Queued`]),
+    /// reported as [`AgentEvent::QueueChanged`].
+    EditQueue {
+        /// Which agent.
+        agent: AgentId,
+        /// What to change.
+        edit: QueueEdit,
+    },
     /// Asks an agent to abandon its current turn.
     InterruptAgent {
         /// Which agent.
@@ -470,6 +478,28 @@ pub enum Reply {
     },
 }
 
+/// A change to the messages waiting for an agent's turn to end ([`Command::EditQueue`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "edit")]
+pub enum QueueEdit {
+    /// Drops the waiting message at `index`; a frontend that edits it takes its text back first.
+    Remove {
+        /// Its place in the queue, from 0.
+        index: usize,
+    },
+    /// Stops the current turn and sends the message at `index` next, ahead of the rest. It also
+    /// resumes a paused queue.
+    SendNow {
+        /// Its place in the queue, from 0.
+        index: usize,
+    },
+    /// Pauses the queue, so nothing is sent when a turn ends, or resumes it.
+    Pause {
+        /// `true` to pause, `false` to resume.
+        paused: bool,
+    },
+}
+
 /// Why a command failed. The daemon's state is unchanged after any failure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(rename_all = "snake_case", tag = "error")]
@@ -507,6 +537,12 @@ pub enum CommandError {
     /// The command needs a workspace with a worktree.
     #[error("the workspace has no worktree")]
     NoWorktree,
+    /// The agent has no waiting message at that place; it was sent or removed meanwhile.
+    #[error("no message is waiting at {index}")]
+    NotQueued {
+        /// The place asked for.
+        index: usize,
+    },
     /// A process on the host failed: the CLI, `git` or `gh`.
     #[error("{message}")]
     Host {
