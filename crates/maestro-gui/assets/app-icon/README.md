@@ -36,6 +36,7 @@ Where each file is used:
 | `icon.ico` | Embedded in the Windows executable as resource 1 by `../windows.rc` (`build.rs`); gpui gives every window that icon. |
 | `icon.icns` | The macOS bundle's `CFBundleIconFile`, beside `../../macos/Info.plist`. |
 | `png/<size>.png`, `icon.svg` | Linux `hicolor/<size>x<size>/apps/io.github.uthree.maestro.png` and `hicolor/scalable`, named after the window's app id and `../../linux/io.github.uthree.maestro.desktop`. |
+| `title-bar.png` | The small drawing at 64 px, first in every window's title bar on Windows and Linux (`TitleBar::app_icon`, served by `AppAssets` in `src/main.rs`). |
 | `symbolic.svg` | Menu bar, tray and monochrome contexts. |
 | `icon-corners.svg`, `icon-medium.svg`, `icon-small.svg`, `icon-macos.svg` | The 128 px, 48–64 px and 16–32 px drawings, and the master on Apple's grid. |
 

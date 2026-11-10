@@ -965,7 +965,7 @@ impl Render for Settings {
             .size_full()
             .flex()
             .flex_col()
-            .child(TitleBar::new().title(tr("Settings", "設定")))
+            .child(TitleBar::new().app_icon(crate::app_icon()).title(tr("Settings", "設定")))
             .child(div().flex().flex_1().min_h_0().child(self.sidebar(cx)).child(page))
             .child(
                 status.trailing(
