@@ -4,8 +4,8 @@
 use atelier::agent::Composer;
 use atelier::{
     ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, Edge, EmptyState, IconName,
-    Label, ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner,
-    Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
+    Label, ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, SelectionScope,
+    Sidebar, Spinner, Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
 };
 use gpui::{
     ClickEvent, Context, Corner, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
@@ -838,9 +838,15 @@ impl Maestro {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap(theme.spacing.lg)
                     .p(theme.spacing.lg)
-                    .children(rows),
+                    // One selection over the whole conversation, as in the commander's.
+                    .child(
+                        SelectionScope::new("worker-selection")
+                            .flex()
+                            .flex_col()
+                            .gap(theme.spacing.lg)
+                            .children(rows),
+                    ),
             )
             .when(reply, |worker| {
                 worker.child(

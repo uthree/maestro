@@ -189,6 +189,11 @@ pub struct Maestro {
     pub(crate) chat_scroll: ScrollHandle,
     /// Which conversation was drawn last and how many rows it had, to follow it as it grows.
     pub(crate) chat_length: (Option<AgentId>, usize),
+    /// Whether the conversation scrolls with what arrives: true while the person reads its
+    /// end, false once they scroll up to read something earlier.
+    pub(crate) chat_following: bool,
+    /// Rows that arrived since the person scrolled away, counted on the jump button.
+    pub(crate) chat_unseen: usize,
     pub(crate) sidebar_open: bool,
     /// The window's width at the last frame, which decides whether the conversation and the
     /// workflow fit side by side.
@@ -253,6 +258,8 @@ impl Maestro {
             conversation: None,
             chat_scroll: ScrollHandle::new(),
             chat_length: (None, 0),
+            chat_following: true,
+            chat_unseen: 0,
             sidebar_open: true,
             window_width: px(0.),
             node_tab: 0,
@@ -1076,6 +1083,7 @@ impl Maestro {
         let has_project = self.project.is_some();
 
         TitleBar::new()
+            .app_icon(crate::app_icon())
             .leading(
                 Button::icon_only("toggle-sidebar", IconName::SidebarLeft)
                     .tooltip(if self.sidebar_open {
