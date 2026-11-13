@@ -4,23 +4,24 @@
 //! Reading happens in `maestro-markdown`, which knows nothing of gpui, so a terminal frontend
 //! can draw the same model. Only the drawing lives here: text runs, code blocks and tables in
 //! the theme, and display maths typeset by RaTeX into an image.
+//!
+//! Every piece of text is an Atelier `SelectableText`, so a selection runs from one block into
+//! the next, and on into the next message when the transcript is a `SelectionScope`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use atelier::{
-    ActiveTheme, CopyButton, CopySelection, Icon, IconName, SELECTABLE_CONTEXT, SelectAll, Theme,
+    ActiveTheme, BLOCK_SEPARATOR, CopyButton, Icon, IconName, LINE_SEPARATOR, SelectableText,
+    SelectionScope, TextSize, Theme,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, ElementId, FocusHandle, FontStyle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, RenderOnce, SharedString, StatefulInteractiveElement,
-    StrikethroughStyle, Styled, StyledText, TextLayout, TextRun, UnderlineStyle, Window, canvas,
-    div, img, prelude::FluentBuilder, px, relative,
+    AnyElement, App, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveElement,
+    IntoElement, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement,
+    StrikethroughStyle, Styled, UnderlineStyle, Window, div, img, prelude::FluentBuilder, px,
 };
 use maestro_markdown::{
     Align, Block, CodeBlock, Document, List, MathBlock, Run, Table, Text, TokenClass,
@@ -55,7 +56,7 @@ fn document(text: &str) -> Rc<Document> {
     })
 }
 
-/// A reply drawn as rich text. Each block's text can be selected and copied.
+/// A reply drawn as rich text. A selection runs across its blocks and is copied as text.
 #[derive(IntoElement)]
 pub struct Markdown {
     id: ElementId,
@@ -74,8 +75,15 @@ impl RenderOnce for Markdown {
         let document = document(&self.text);
         let theme = cx.theme().clone();
         let mut counter = 0;
-        let mut painter = Painter { id: self.id, counter: &mut counter, theme: &theme, window };
-        div()
+        let mut painter = Painter {
+            id: self.id.clone(),
+            counter: &mut counter,
+            theme: &theme,
+            window,
+            separator: None,
+        };
+        // A scope of its own when drawn alone; inside the transcript's it joins that one.
+        SelectionScope::new(self.id)
             .flex()
             .flex_col()
             .gap(theme.spacing.md)
@@ -91,12 +99,40 @@ struct Painter<'a> {
     counter: &'a mut usize,
     theme: &'a Theme,
     window: &'a mut Window,
+    /// What the next piece of text puts before itself when copied with the one before, if not
+    /// a blank line.
+    separator: Option<&'static str>,
 }
 
 impl Painter<'_> {
     fn next_id(&mut self, kind: &str) -> ElementId {
         *self.counter += 1;
         ElementId::NamedChild(Box::new(self.id.clone()), format!("{kind}-{}", self.counter).into())
+    }
+
+    /// A run of Markdown text, selectable with its styles and links.
+    fn text(&mut self, kind: &str, text: &Text, size: TextSize) -> SelectableText {
+        let separator = self.separator.take().unwrap_or(BLOCK_SEPARATOR);
+        let mut plain = String::new();
+        let mut styles = Vec::new();
+        let mut links = Vec::new();
+        for run in &text.runs {
+            let start = plain.len();
+            plain.push_str(&run.text);
+            let range = start..plain.len();
+            if let Some(url) = &run.style.link {
+                links.push((range.clone(), SharedString::from(url.clone())));
+            }
+            styles.push((range, run_style(run, self.theme)));
+        }
+        let mut selectable = SelectableText::new(self.next_id(kind), plain)
+            .separator(separator)
+            .size(size)
+            .styles(styles);
+        for (range, url) in links {
+            selectable = selectable.link(range, url);
+        }
+        selectable
     }
 
     fn blocks(&mut self, blocks: &[Block]) -> Vec<AnyElement> {
@@ -107,21 +143,19 @@ impl Painter<'_> {
         let theme = self.theme;
         match block {
             Block::Paragraph(text) => {
-                RichText::from_text(self.next_id("p"), text, theme).into_any_element()
+                div().min_w_0().child(self.text("p", text, TextSize::Medium)).into_any_element()
             }
             Block::Heading { level, text } => {
                 let size = match level {
-                    1 => theme.typography.size_xl,
-                    2 => theme.typography.size_lg,
-                    _ => theme.typography.size_md,
+                    1 => TextSize::XLarge,
+                    2 => TextSize::Large,
+                    _ => TextSize::Medium,
                 };
                 div()
+                    .min_w_0()
                     .when(*level <= 2, |heading| heading.pt(theme.spacing.xs))
-                    .child(
-                        RichText::from_text(self.next_id("h"), text, theme)
-                            .size(size)
-                            .weight(theme.typography.heading_weight),
-                    )
+                    .font_weight(theme.typography.heading_weight)
+                    .child(self.text("h", text, size))
                     .into_any_element()
             }
             Block::Code(code) => self.code(code),
@@ -156,6 +190,10 @@ impl Painter<'_> {
             .iter()
             .enumerate()
             .map(|(index, item)| {
+                // Items copy one to a line, like the list they came from.
+                if index > 0 {
+                    self.separator = Some(LINE_SEPARATOR);
+                }
                 let marker = match (item.checked, list.start) {
                     (Some(checked), _) => task_box(checked, theme).into_any_element(),
                     (None, Some(start)) => div()
@@ -200,10 +238,11 @@ impl Painter<'_> {
             for column in 0..columns {
                 let align = table.alignments.get(column).copied().unwrap_or(Align::None);
                 let text = row.get(column).cloned().unwrap_or_default();
-                let mut rich = RichText::from_text(self.next_id("cell"), &text, theme);
-                if header {
-                    rich = rich.weight(theme.typography.label_weight);
+                // A row copies to a line, its cells apart by tabs, as a spreadsheet pastes it.
+                if index > 0 || column > 0 {
+                    self.separator = Some(if column == 0 { LINE_SEPARATOR } else { "\t" });
                 }
+                let rich = self.text("cell", &text, TextSize::Small);
                 cells.push(
                     div()
                         .flex()
@@ -211,7 +250,9 @@ impl Painter<'_> {
                         .px(theme.spacing.sm)
                         .py(theme.spacing.xs)
                         .when(!last, |cell| cell.border_b_1().border_color(theme.colors.border))
-                        .when(header, |cell| cell.bg(theme.colors.sunken))
+                        .when(header, |cell| {
+                            cell.bg(theme.colors.sunken).font_weight(theme.typography.label_weight)
+                        })
                         .map(|cell| match align {
                             Align::Center => cell.justify_center(),
                             Align::Right => cell.justify_end(),
@@ -233,7 +274,6 @@ impl Painter<'_> {
                     .grid()
                     .grid_cols(columns as u16)
                     .min_w(px(120. * columns as f32))
-                    .text_size(theme.typography.size_sm)
                     .children(cells),
             )
             .into_any_element()
@@ -246,7 +286,7 @@ impl Painter<'_> {
         let id = self.next_id("code");
         let language = block.language.clone().unwrap_or_else(|| "text".into());
         let mut text = String::new();
-        let mut spans = Vec::new();
+        let mut styles = Vec::new();
         for (index, line) in block.lines.iter().enumerate() {
             if index > 0 {
                 text.push('\n');
@@ -254,9 +294,10 @@ impl Painter<'_> {
             for token in line {
                 let start = text.len();
                 text.push_str(&token.text);
-                spans.push((start..text.len(), token_span(token.class, theme)));
+                styles.push((start..text.len(), token_style(token.class, theme)));
             }
         }
+        let separator = self.separator.take().unwrap_or(BLOCK_SEPARATOR);
         div()
             .flex()
             .flex_col()
@@ -296,7 +337,11 @@ impl Painter<'_> {
                     .py(theme.spacing.sm)
                     .whitespace_nowrap()
                     .child(
-                        RichText::new(id, text).spans(spans).mono().size(theme.typography.size_sm),
+                        SelectableText::new(id, text)
+                            .separator(separator)
+                            .mono()
+                            .size(TextSize::Small)
+                            .styles(styles),
                     ),
             )
             .into_any_element()
@@ -307,16 +352,25 @@ impl Painter<'_> {
         let theme = self.theme;
         let id = self.next_id("math");
         let formula = formula(&block.source, theme.colors.text, self.window.scale_factor());
+        let separator = self.separator.take().unwrap_or(BLOCK_SEPARATOR);
         let body = match formula {
             Some(formula) => img(formula.image.clone())
                 .flex_none()
                 .w(px(formula.width))
                 .h(px(formula.height))
                 .into_any_element(),
-            None => RichText::new(id.clone(), block.math.to_unicode())
-                .italic()
-                .size(theme.typography.size_lg)
-                .into_any_element(),
+            None => {
+                let text = block.math.to_unicode();
+                let italic = HighlightStyle {
+                    font_style: Some(FontStyle::Italic),
+                    ..HighlightStyle::default()
+                };
+                SelectableText::new((id.clone(), "text"), text.clone())
+                    .separator(separator)
+                    .size(TextSize::Large)
+                    .styles([(0..text.len(), italic)])
+                    .into_any_element()
+            }
         };
         div()
             .id(id)
@@ -349,12 +403,14 @@ fn task_box(checked: bool, theme: &Theme) -> impl IntoElement + use<> {
 }
 
 /// How a highlighted token is set.
-fn token_span(class: TokenClass, theme: &Theme) -> Span {
+fn token_style(class: TokenClass, theme: &Theme) -> HighlightStyle {
     let colors = &theme.colors;
-    let color = |color| Span { color: Some(color), ..Span::default() };
+    let color = |color| HighlightStyle { color: Some(color), ..HighlightStyle::default() };
     match class {
-        TokenClass::Plain => Span::default(),
-        TokenClass::Comment => Span { italic: true, ..color(colors.text_faint) },
+        TokenClass::Plain => HighlightStyle::default(),
+        TokenClass::Comment => {
+            HighlightStyle { font_style: Some(FontStyle::Italic), ..color(colors.text_faint) }
+        }
         TokenClass::Keyword | TokenClass::Tag => color(colors.danger),
         TokenClass::String => color(colors.success),
         TokenClass::Number | TokenClass::Constant => color(colors.info),
@@ -362,26 +418,36 @@ fn token_span(class: TokenClass, theme: &Theme) -> Span {
         TokenClass::Type | TokenClass::Attribute => color(colors.warning),
         TokenClass::Operator | TokenClass::Punctuation => color(colors.text_muted),
         TokenClass::Inserted => {
-            Span { background: Some(colors.success_wash), ..color(colors.success) }
+            HighlightStyle { background_color: Some(colors.success_wash), ..color(colors.success) }
         }
         TokenClass::Deleted => {
-            Span { background: Some(colors.danger_wash), ..color(colors.danger) }
+            HighlightStyle { background_color: Some(colors.danger_wash), ..color(colors.danger) }
         }
-        TokenClass::Heading => Span { bold: true, ..color(colors.info) },
+        TokenClass::Heading => {
+            HighlightStyle { font_weight: Some(FontWeight::BOLD), ..color(colors.info) }
+        }
     }
 }
 
-/// How a run of Markdown text is set.
-fn run_span(run: &Run, theme: &Theme) -> Span {
+/// How a run of Markdown text is set: as Atelier's own Markdown sets it, with inline code on
+/// a wash (a highlight cannot change the font) and inline maths in italics.
+fn run_style(run: &Run, theme: &Theme) -> HighlightStyle {
     let style = &run.style;
-    Span {
-        color: if style.link.is_some() { Some(theme.colors.accent_text) } else { None },
-        background: style.code.then_some(theme.colors.hover),
-        bold: style.strong,
-        italic: style.emphasis || style.math,
-        strike: style.strikethrough,
-        underline: style.link.is_some(),
-        mono: style.code,
+    let link = style.link.is_some().then_some(theme.colors.accent_text);
+    HighlightStyle {
+        color: link,
+        background_color: style.code.then_some(theme.colors.hover),
+        font_weight: style.strong.then_some(FontWeight::BOLD),
+        font_style: (style.emphasis || style.math).then_some(FontStyle::Italic),
+        strikethrough: style
+            .strikethrough
+            .then_some(StrikethroughStyle { thickness: px(1.), color: None }),
+        underline: link.map(|color| UnderlineStyle {
+            thickness: px(1.),
+            color: Some(color.opacity(0.45)),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
     }
 }
 
@@ -460,378 +526,9 @@ fn typeset(tex: &str, color: gpui::Rgba, scale: f32) -> Option<Formula> {
     })
 }
 
-/// How part of a [`RichText`] is set, over its base style.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Span {
-    /// The text colour, if not the base one.
-    pub color: Option<Hsla>,
-    /// A fill behind the text.
-    pub background: Option<Hsla>,
-    /// Bold.
-    pub bold: bool,
-    /// Italic.
-    pub italic: bool,
-    /// Struck through.
-    pub strike: bool,
-    /// Underlined.
-    pub underline: bool,
-    /// In the monospaced font.
-    pub mono: bool,
-}
-
-/// What one [`RichText`] remembers between frames: its selection, as Atelier's
-/// `SelectableText` keeps it.
-struct Selection {
-    focus: FocusHandle,
-    text: SharedString,
-    anchor: usize,
-    head: usize,
-    dragging: bool,
-    /// The link pressed, opened if the press ends without a drag.
-    pressed: Option<SharedString>,
-    /// Whether the pointer is over a link.
-    over_link: bool,
-    layout: Option<TextLayout>,
-}
-
-impl Selection {
-    fn range(&self) -> Range<usize> {
-        self.anchor.min(self.head)..self.anchor.max(self.head)
-    }
-
-    fn index_at(&self, position: Point<Pixels>) -> Option<usize> {
-        let layout = self.layout.as_ref()?;
-        let index = layout.index_for_position(position).unwrap_or_else(|index| index);
-        Some(floor_boundary(&self.text, index))
-    }
-}
-
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-/// The link at `index`, if any.
-fn link_at(links: &[(Range<usize>, SharedString)], index: usize) -> Option<SharedString> {
-    links.iter().find(|(range, _)| range.contains(&index)).map(|(_, url)| url.clone())
-}
-
-/// Styled text the person can select and copy, whose links open on click. Atelier's
-/// `SelectableText` draws one style; this draws runs of several, keeping its gestures: drag
-/// to select, Shift-click to extend, double-click for a word, ⌘C / Ctrl+C to copy.
-#[derive(IntoElement)]
-pub struct RichText {
-    id: ElementId,
-    text: SharedString,
-    spans: Vec<(Range<usize>, Span)>,
-    links: Vec<(Range<usize>, SharedString)>,
-    size: Option<Pixels>,
-    weight: Option<FontWeight>,
-    mono: bool,
-    italic: bool,
-}
-
-impl RichText {
-    /// `text` in the base style.
-    pub fn new(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Self {
-        Self {
-            id: id.into(),
-            text: text.into(),
-            spans: Vec::new(),
-            links: Vec::new(),
-            size: None,
-            weight: None,
-            mono: false,
-            italic: false,
-        }
-    }
-
-    /// A paragraph of Markdown text, with its styles and links.
-    fn from_text(id: ElementId, text: &Text, theme: &Theme) -> Self {
-        let mut plain = String::new();
-        let mut spans = Vec::new();
-        let mut links = Vec::new();
-        for run in &text.runs {
-            let start = plain.len();
-            plain.push_str(&run.text);
-            let range = start..plain.len();
-            if let Some(url) = &run.style.link {
-                links.push((range.clone(), SharedString::from(url.clone())));
-            }
-            spans.push((range, run_span(run, theme)));
-        }
-        Self { spans, links, ..Self::new(id, plain) }
-    }
-
-    /// Styles over parts of the text: byte ranges, in order, not overlapping.
-    pub fn spans(mut self, spans: Vec<(Range<usize>, Span)>) -> Self {
-        self.spans = spans;
-        self
-    }
-
-    /// The type size.
-    pub fn size(mut self, size: Pixels) -> Self {
-        self.size = Some(size);
-        self
-    }
-
-    /// The weight of the whole text.
-    pub fn weight(mut self, weight: FontWeight) -> Self {
-        self.weight = Some(weight);
-        self
-    }
-
-    /// The whole text in the monospaced font.
-    pub fn mono(mut self) -> Self {
-        self.mono = true;
-        self
-    }
-
-    /// The whole text in italics.
-    pub fn italic(mut self) -> Self {
-        self.italic = true;
-        self
-    }
-
-    /// The runs gpui lays out: the spans, cut where the selection begins and ends.
-    fn runs(&self, theme: &Theme, color: Hsla, selection: Option<Range<usize>>) -> Vec<TextRun> {
-        let len = self.text.len();
-        let mut cuts = vec![0, len];
-        for (range, _) in &self.spans {
-            cuts.extend([range.start.min(len), range.end.min(len)]);
-        }
-        if let Some(range) = &selection {
-            cuts.extend([range.start, range.end]);
-        }
-        cuts.sort_unstable();
-        cuts.dedup();
-        let base = if self.mono { &theme.typography.mono } else { &theme.typography.ui };
-        cuts.windows(2)
-            .map(|cut| {
-                let (start, end) = (cut[0], cut[1]);
-                let span = self
-                    .spans
-                    .iter()
-                    .find(|(range, _)| range.start <= start && start < range.end)
-                    .map(|(_, span)| span.clone())
-                    .unwrap_or_default();
-                let mut font = if span.mono { theme.typography.mono.clone() } else { base.clone() };
-                if let Some(weight) = self.weight {
-                    font.weight = weight;
-                }
-                if span.bold {
-                    font.weight = FontWeight::BOLD;
-                }
-                if span.italic || self.italic {
-                    font.style = FontStyle::Italic;
-                }
-                let selected = selection.as_ref().is_some_and(|range| range.contains(&start));
-                let text_color = span.color.unwrap_or(color);
-                TextRun {
-                    len: end - start,
-                    font,
-                    color: text_color,
-                    background_color: if selected {
-                        Some(theme.colors.selection)
-                    } else {
-                        span.background
-                    },
-                    underline: span.underline.then_some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(text_color.opacity(0.5)),
-                        wavy: false,
-                    }),
-                    strikethrough: span.strike.then_some(StrikethroughStyle {
-                        thickness: px(1.),
-                        color: Some(text_color),
-                    }),
-                }
-            })
-            .collect()
-    }
-}
-
-impl RenderOnce for RichText {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let color = theme.colors.text;
-        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| Selection {
-            focus: cx.focus_handle(),
-            text: SharedString::default(),
-            anchor: 0,
-            head: 0,
-            dragging: false,
-            pressed: None,
-            over_link: false,
-            layout: None,
-        });
-        let text = self.text.clone();
-        let selection = state.update(cx, |selection, _| {
-            if selection.text != text {
-                selection.anchor = floor_boundary(&text, selection.anchor);
-                selection.head = floor_boundary(&text, selection.head);
-                selection.text = text.clone();
-            }
-            let range = selection.range();
-            (selection.focus.is_focused(window) && !range.is_empty()).then_some(range)
-        });
-        let styled = StyledText::new(text).with_runs(self.runs(&theme, color, selection));
-        let (focus, dragging, over_link) = state.update(cx, |selection, _| {
-            selection.layout = Some(styled.layout().clone());
-            (selection.focus.clone(), selection.dragging, selection.over_link)
-        });
-        let links = Rc::new(self.links);
-
-        div()
-            .id(self.id.clone())
-            .track_focus(&focus)
-            .key_context(SELECTABLE_CONTEXT)
-            .relative()
-            .map(|element| if over_link { element.cursor_pointer() } else { element.cursor_text() })
-            .when_some(self.size, |element, size| element.text_size(size))
-            .line_height(relative(1.5))
-            .on_mouse_down(MouseButton::Left, {
-                let (state, links) = (state.clone(), links.clone());
-                move |event: &MouseDownEvent, window, cx| {
-                    let focus = state.read(cx).focus.clone();
-                    window.focus(&focus);
-                    state.update(cx, |selection, cx| {
-                        let Some(index) = selection.index_at(event.position) else { return };
-                        let range = match event.click_count {
-                            2 => word_at(&selection.text, index),
-                            3.. => 0..selection.text.len(),
-                            _ if event.modifiers.shift => selection.anchor..index,
-                            _ => index..index,
-                        };
-                        (selection.anchor, selection.head) = (range.start, range.end);
-                        selection.dragging = event.click_count < 2;
-                        selection.pressed = (event.click_count == 1 && !event.modifiers.shift)
-                            .then(|| link_at(&links, index))
-                            .flatten();
-                        cx.notify();
-                    });
-                }
-            })
-            .on_mouse_move({
-                let (state, links) = (state.clone(), links.clone());
-                move |event: &MouseMoveEvent, _, cx| {
-                    state.update(cx, |selection, cx| {
-                        let over = selection
-                            .index_at(event.position)
-                            .is_some_and(|index| link_at(&links, index).is_some());
-                        if over != selection.over_link {
-                            selection.over_link = over;
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .on_action({
-                let state = state.clone();
-                move |_: &CopySelection, _, cx| {
-                    let selection = state.read(cx);
-                    let range = selection.range();
-                    if range.is_empty() {
-                        cx.propagate();
-                        return;
-                    }
-                    let copied = selection.text[range].to_owned();
-                    cx.write_to_clipboard(ClipboardItem::new_string(copied));
-                }
-            })
-            .on_action({
-                let state = state.clone();
-                move |_: &SelectAll, _, cx| {
-                    state.update(cx, |selection, cx| {
-                        (selection.anchor, selection.head) = (0, selection.text.len());
-                        cx.notify();
-                    });
-                }
-            })
-            .child(styled)
-            // While a drag is under way, follow the pointer anywhere in the window.
-            .when_some(dragging.then_some(state), |element, state| {
-                element.child(
-                    canvas(
-                        |_, _, _| {},
-                        move |_, _, window, _| {
-                            window.on_mouse_event({
-                                let state = state.clone();
-                                move |event: &MouseMoveEvent, phase, _, cx| {
-                                    if !phase.bubble() || event.pressed_button.is_none() {
-                                        return;
-                                    }
-                                    state.update(cx, |selection, cx| {
-                                        if let Some(index) = selection.index_at(event.position)
-                                            && index != selection.head
-                                        {
-                                            selection.head = index;
-                                            selection.pressed = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                }
-                            });
-                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                                if !phase.bubble() {
-                                    return;
-                                }
-                                let link = state.update(cx, |selection, cx| {
-                                    selection.dragging = false;
-                                    cx.notify();
-                                    selection.pressed.take()
-                                });
-                                if let Some(url) = link {
-                                    cx.open_url(&url);
-                                }
-                            });
-                        },
-                    )
-                    .absolute(),
-                )
-            })
-    }
-}
-
-/// The word, or run of spaces or punctuation, around `index`.
-fn word_at(text: &str, index: usize) -> Range<usize> {
-    let kind = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            0
-        } else if c.is_whitespace() {
-            1
-        } else {
-            2
-        }
-    };
-    let Some(at) = text[index..].chars().next().map(kind) else { return index..index };
-    let start = text[..index]
-        .char_indices()
-        .rev()
-        .take_while(|(_, c)| kind(*c) == at)
-        .last()
-        .map_or(index, |(start, _)| start);
-    let end = text[index..]
-        .char_indices()
-        .find(|(_, c)| kind(*c) != at)
-        .map_or(text.len(), |(end, _)| index + end);
-    start..end
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn words_around_a_point() {
-        let text = "let foo_bar = 1;";
-        assert_eq!(&text[word_at(text, 5)], "foo_bar");
-        assert_eq!(&text[word_at(text, 0)], "let");
-        assert_eq!(word_at(text, text.len()), text.len()..text.len());
-    }
 
     #[test]
     fn the_same_text_is_read_once() {

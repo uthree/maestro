@@ -189,6 +189,13 @@ pub struct Maestro {
     pub(crate) chat_scroll: ScrollHandle,
     /// Which conversation was drawn last and how many rows it had, to follow it as it grows.
     pub(crate) chat_length: (Option<AgentId>, usize),
+    /// Whether the conversation scrolls with what arrives: true while the person reads its
+    /// end, false once they scroll up to read something earlier.
+    pub(crate) chat_following: bool,
+    /// Rows that arrived since the person scrolled away, counted on the jump button.
+    pub(crate) chat_unseen: usize,
+    /// Whether a reply was streaming at the last frame, to follow it to its very end.
+    pub(crate) chat_was_busy: bool,
     pub(crate) sidebar_open: bool,
     /// The window's width at the last frame, which decides whether the conversation and the
     /// workflow fit side by side.
@@ -253,6 +260,9 @@ impl Maestro {
             conversation: None,
             chat_scroll: ScrollHandle::new(),
             chat_length: (None, 0),
+            chat_following: true,
+            chat_unseen: 0,
+            chat_was_busy: false,
             sidebar_open: true,
             window_width: px(0.),
             node_tab: 0,
@@ -266,7 +276,7 @@ impl Maestro {
             menu: None,
             dialog: None,
             dialog_focus: cx.focus_handle(),
-            canvas: Canvas::default(),
+            canvas: Canvas::new(cx),
             expanded: HashSet::new(),
             ratings: HashMap::new(),
             error: None,
@@ -523,7 +533,7 @@ impl Maestro {
         if self.workflow != Some(workflow) {
             self.workflow = Some(workflow);
             self.selected = None;
-            self.canvas.reset();
+            self.canvas.reset_later();
         }
     }
 
@@ -963,9 +973,9 @@ impl Maestro {
             origin: NodeOrigin::User,
             conversation: None,
         };
-        self.request(Command::AddNode { workflow, node }, cx, move |this, reply, _| {
+        self.request(Command::AddNode { workflow, node }, cx, move |this, reply, cx| {
             if let Reply::NodeAdded { node } = reply {
-                this.canvas.place_new(workflow, node);
+                this.canvas.place_new(workflow, node, cx);
                 this.select(Some(node));
             }
         });
@@ -1076,6 +1086,7 @@ impl Maestro {
         let has_project = self.project.is_some();
 
         TitleBar::new()
+            .app_icon(crate::app_icon())
             .leading(
                 Button::icon_only("toggle-sidebar", IconName::SidebarLeft)
                     .tooltip(if self.sidebar_open {
@@ -1237,6 +1248,7 @@ impl Render for Maestro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fill_fields(window, cx);
         self.fill_project_name(window, cx);
+        self.show_graph(cx);
         if self.placeholders != i18n::lang() {
             self.placeholders = i18n::lang();
             self.fields.translate(window, cx);

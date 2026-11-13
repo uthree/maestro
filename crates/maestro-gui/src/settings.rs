@@ -15,14 +15,16 @@
 use std::sync::Arc;
 
 use atelier::{
-    ActiveTheme, Appearance, Badge, Button, ControlSize, Direction, Edge, FormField, FormGroup,
-    IconName, Label, ListItem, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner,
-    StatusBar, Switch, TextColor, TextSize, Theme, TitleBar, Tone, WindowFrame, agent::CodeBlock,
+    ActiveStrings, ActiveTheme, Appearance, Badge, Button, ControlSize, Direction, IconName, Label,
+    PreferencesWindow, Segment, SegmentedControl, Setting, SettingsGroup, SettingsPage, Spinner,
+    StatusBar, Switch, TextColor, TextField, TextSize, Theme, TitleBar, Tone, WindowFrame,
+    agent::CodeBlock,
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, div, prelude::*, px,
 };
+use gpui_component::input::{InputEvent, InputState};
 use maestro_client::{Client, ClientError};
 use maestro_core::{
     Comparison, DEFAULT_MAX_AGENTS, Difficulty, Host, ProviderKind, ProviderStatus, Router,
@@ -56,7 +58,7 @@ pub fn open(app: &mut Maestro, cx: &mut Context<Maestro>) {
         let options = crate::window_options("Settings", SIZE, MIN_SIZE, cx);
         let opened = cx.open_window(options, |window, cx| {
             atelier::set_window_background(window, &cx.theme().clone());
-            let view = cx.new(|cx| Settings::new(main.clone(), cx));
+            let view = cx.new(|cx| Settings::new(main.clone(), window, cx));
             cx.new(|cx| gpui_component::Root::new(view, window, cx))
         });
         main.update(cx, |app, cx| {
@@ -125,13 +127,23 @@ pub struct Settings {
     /// What the last action did.
     status: Option<(SharedString, Tone)>,
     preferences: Preferences,
+    /// The search over every setting, in the sidebar.
+    search: Entity<InputState>,
     _follow: Subscription,
+    _search: Subscription,
 }
 
 impl Settings {
-    fn new(main: Entity<Maestro>, cx: &mut Context<Self>) -> Self {
+    fn new(main: Entity<Maestro>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // The main window's copy moves with the daemon's events; this window redraws with it.
         let follow = cx.observe(&main, |_, _, cx| cx.notify());
+        // The field draws the placeholder (Atelier's words), so the input keeps none.
+        let search = input::line("", "", window, cx);
+        let search_changed = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let mut settings = Self {
             main,
             page: Page::General,
@@ -140,7 +152,9 @@ impl Settings {
             scanning: false,
             status: None,
             preferences: Preferences::load(),
+            search,
             _follow: follow,
+            _search: search_changed,
         };
         settings.scan(cx);
         settings
@@ -305,30 +319,7 @@ impl Settings {
 
     // Drawing.
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let pages = Page::ALL.map(|page| {
-            ListItem::new(page.title(), page.title())
-                .icon(page.icon())
-                .description(page.description())
-                .description_lines(2)
-                .selected(self.page == page)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.page = page;
-                    this.status = None;
-                    cx.notify();
-                }))
-        });
-        Sidebar::new(Edge::Left)
-            .id("pages")
-            .overflow_y_scroll()
-            .w(px(260.))
-            .p(theme.spacing.sm)
-            .gap(theme.spacing.xxs)
-            .children(pages)
-    }
-
-    fn general(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn general(&self, cx: &mut Context<Self>) -> Vec<SettingsGroup> {
         let theme = cx.theme().clone();
         let lang = match self.preferences.lang() {
             None => 0,
@@ -341,9 +332,9 @@ impl Settings {
             Direction::ALL.iter().position(|candidate| *candidate == direction).unwrap_or(0);
         let place = link::describe(&self.main.read(cx).launch);
         vec![
-            FormGroup::new(tr("Language", "言語"))
-                .child(
-                    FormField::new(tr("Display language", "表示言語"))
+            SettingsGroup::new(tr("Language", "言語"))
+                .setting(
+                    Setting::new(tr("Display language", "表示言語"))
                         .description(tr(
                             "The language of Maestro's own words. What the agents write is shown \
                              as they write it.",
@@ -371,15 +362,14 @@ impl Settings {
                                 cx.notify();
                             })),
                         ),
-                )
-                .into_any_element(),
-            FormGroup::new(tr("Appearance", "外観"))
+                ),
+            SettingsGroup::new(tr("Appearance", "外観"))
                 .description(tr(
                     "Saved on this computer and applied at once, to every Maestro window.",
                     "このコンピューターに保存され、すべての Maestro のウィンドウにすぐ反映されます。",
                 ))
-                .child(
-                    FormField::new(tr("Mode", "モード")).child(
+                .setting(
+                    Setting::new(tr("Mode", "モード")).child(
                         SegmentedControl::new(
                             "appearance",
                             [Segment::label(tr("Dark", "ダーク")), Segment::label(tr("Light", "ライト"))],
@@ -393,8 +383,8 @@ impl Settings {
                         })),
                     ),
                 )
-                .child(
-                    FormField::new(tr("Style", "スタイル"))
+                .setting(
+                    Setting::new(tr("Style", "スタイル"))
                         .description(tr(
                             "Glass lets the desktop show through the chrome; Studio and Mono are \
                              solid.",
@@ -411,11 +401,10 @@ impl Settings {
                                 this.set_theme(Direction::ALL[*index], appearance, cx);
                             })),
                         ),
-                )
-                .into_any_element(),
-            FormGroup::new(tr("Connection", "接続"))
-                .child(
-                    FormField::new(tr("Daemon", "デーモン"))
+                ),
+            SettingsGroup::new(tr("Connection", "接続"))
+                .setting(
+                    Setting::new(tr("Daemon", "デーモン"))
                         .description(tr(
                             "Where the agents run and the work is kept. Choose it when starting \
                              Maestro, with --ssh.",
@@ -423,12 +412,11 @@ impl Settings {
                              選びます。",
                         ))
                         .child(Label::new(place).color(TextColor::Muted)),
-                )
-                .into_any_element(),
+                ),
         ]
     }
 
-    fn providers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn providers(&self, cx: &mut Context<Self>) -> Vec<SettingsGroup> {
         let host = Self::host();
         let router = self.router(cx);
         let place = link::describe(&self.main.read(cx).launch);
@@ -458,7 +446,7 @@ impl Settings {
         enabled: bool,
         place: &str,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> SettingsGroup {
         let theme = cx.theme().clone();
         let installed = status.as_ref().is_some_and(ProviderStatus::installed);
         let running = status.as_ref().and_then(|status| status.setup).is_some()
@@ -503,15 +491,15 @@ impl Settings {
         .disabled(running || status.is_none())
         .on_click(cx.listener(move |this, _, _, cx| this.setup(provider, action, cx)));
 
-        let mut group = FormGroup::new(provider.label())
+        let mut group = SettingsGroup::new(provider.label())
             .description(trf!(
                 "Runs as the {} command on {place}.",
                 "{place}で {} コマンドとして動きます。",
                 provider.executable()
             ))
-            .child(summary)
-            .child(
-                FormField::new(tr("Use for work", "作業に使う"))
+            .setting(Setting::new(tr("Status", "状態")).child(summary))
+            .setting(
+                Setting::new(tr("Use for work", "作業に使う"))
                     .description(if installed {
                         tr(
                             "The commander and the router may give steps to it.",
@@ -528,8 +516,8 @@ impl Settings {
                         cx.listener(move |this, _, _, cx| this.set_enabled(provider, !enabled, cx)),
                     )),
             )
-            .child(
-                FormField::new(if installed {
+            .setting(
+                Setting::new(if installed {
                     tr("Update to the latest release", "最新版に更新")
                 } else {
                     tr("Install", "インストール")
@@ -544,11 +532,11 @@ impl Settings {
                 .child(button),
             );
         if let Some(setup) = setup {
-            group = group.child(self.output(provider, &setup, status.as_ref(), cx));
+            group = group.setting(self.output(provider, &setup, status.as_ref(), cx));
         }
         if installed {
-            group = group.child(
-                FormField::new(tr("Sign in", "サインイン"))
+            group = group.setting(
+                Setting::new(tr("Sign in", "サインイン"))
                     .description(trf!(
                         "Each CLI signs in to your account in a terminal. Run this once on \
                          {place} if it has not been signed in.",
@@ -564,7 +552,7 @@ impl Settings {
                     ),
             );
         }
-        group.into_any_element()
+        group
     }
 
     /// What an install or update wrote, and how it ended.
@@ -574,7 +562,7 @@ impl Settings {
         setup: &maestro_client::mirror::Setup,
         status: Option<&ProviderStatus>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Setting {
         let theme = cx.theme().clone();
         let start = setup.lines.len().saturating_sub(OUTPUT_LINES);
         let text = setup.lines[start..].join("\n");
@@ -604,7 +592,7 @@ impl Settings {
                 Tone::Danger,
             ),
         };
-        let field = FormField::new(tr("Output", "出力")).child(
+        Setting::new(tr("Output", "出力")).child(
             div()
                 .flex()
                 .flex_col()
@@ -635,11 +623,10 @@ impl Settings {
                     .title(setup.script.clone())
                     .terminal(),
                 ),
-        );
-        field.into_any_element()
+        )
     }
 
-    fn routing(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn routing(&self, cx: &mut Context<Self>) -> Vec<SettingsGroup> {
         let router = self.router(cx);
         let comparison = self.draft.clone().unwrap_or_else(|| router.comparison.clone());
         let edit = |change: fn(&mut Comparison, usize)| {
@@ -662,7 +649,7 @@ impl Settings {
         let (worker_values, worker_index) = choices(&[1, 2, 3, 4, 6, 8], comparison.max_workers);
         let max_agents = self.agents_draft.unwrap_or(router.max_agents);
         let (agent_values, agent_index) = choices(&AGENT_LIMITS, max_agents);
-        let agents = FormGroup::new(tr("Agents at once", "同時に動くエージェント"))
+        let agents = SettingsGroup::new(tr("Agents at once", "同時に動くエージェント"))
             .description(tr(
                 "A step too big for one worker goes to a lead, who plans it as a workflow of its \
                  own, and that workflow's steps can go to leads in turn, as deep as the work \
@@ -673,8 +660,8 @@ impl Settings {
                  制限はありません。ここでは、同時に作業するワーカーとリードの数を制限します。上限を\
                  超えたステップは順番を待ちます。会話するコマンダーは数えません。",
             ))
-            .child(
-                FormField::new(tr("Workers and leads", "ワーカーとリードの数")).child(
+            .setting(
+                Setting::new(tr("Workers and leads", "ワーカーとリードの数")).child(
                     SegmentedControl::new(
                         "max-agents",
                         agent_values.iter().map(|&count| {
@@ -699,14 +686,14 @@ impl Settings {
                 ),
             );
 
-        let mut limits = FormGroup::new(tr("Limits", "同時実行の上限")).description(tr(
+        let mut limits = SettingsGroup::new(tr("Limits", "同時実行の上限")).description(tr(
             "Comparing costs compute and usage. Past these limits steps run on one model; work \
              that is not compared still starts.",
             "比較は計算資源と利用枠を使います。上限を超えると比較せず1つのモデルで実行します。\
              比較しない作業はそのまま始まります。",
         ));
-        limits = limits.child(
-            FormField::new(tr("Workers on the host", "ホストのワーカー数"))
+        limits = limits.setting(
+            Setting::new(tr("Workers on the host", "ホストのワーカー数"))
                 .description(tr(
                     "Steps are compared only while fewer workers than this are running.",
                     "動いているワーカーがこの数より少ないときだけ比較します。",
@@ -727,8 +714,8 @@ impl Settings {
         for provider in ProviderKind::ALL {
             let limit = comparison.per_provider.get(&provider).copied().unwrap_or(0);
             let (values, index) = choices(&[0, 1, 2, 3, 4], limit);
-            limits = limits.child(
-                FormField::new(trf!("{} workers", "{} のワーカー数", provider.label())).child(
+            limits = limits.setting(
+                Setting::new(trf!("{} workers", "{} のワーカー数", provider.label())).child(
                     SegmentedControl::new(
                         SharedString::from(format!("limit-{}", provider.executable())),
                         values.iter().map(|&count| {
@@ -779,16 +766,16 @@ impl Settings {
         });
 
         vec![
-            agents.into_any_element(),
-            FormGroup::new(tr("Comparison", "比較"))
+            agents,
+            SettingsGroup::new(tr("Comparison", "比較"))
                 .description(tr(
                     "When there is room, a step runs on several models at once and you keep the \
                      better result. Your picks teach the router which model suits which work.",
                     "余裕があるとき、同じステップを複数のモデルで同時に走らせ、良い方を選べます。\
                      選んだ結果から、どのモデルがどの作業に向くかを学びます。",
                 ))
-                .child(
-                    FormField::new(tr("Models per step", "1ステップで比べるモデル数")).child(
+                .setting(
+                    Setting::new(tr("Models per step", "1ステップで比べるモデル数")).child(
                         SegmentedControl::new(
                             "contenders",
                             contender_values.iter().map(|&count| {
@@ -807,8 +794,8 @@ impl Settings {
                         })),
                     ),
                 )
-                .child(
-                    FormField::new(tr("From difficulty", "比較する難易度"))
+                .setting(
+                    Setting::new(tr("From difficulty", "比較する難易度"))
                         .description(tr(
                             "Easier steps always run on one model.",
                             "これより簡単なステップは、常に1つのモデルで実行します。",
@@ -825,33 +812,33 @@ impl Settings {
                                 draft.min_difficulty = Difficulty::ALL[index];
                             })),
                         ),
-                )
-                .into_any_element(),
-            limits.into_any_element(),
-            FormGroup::new(tr("Models", "モデル"))
+                ),
+            limits,
+            SettingsGroup::new(tr("Models", "モデル"))
                 .description(tr(
                     "The models the router chooses from, their grades and the benchmark results \
                      it trusts are edited in router.json in the daemon's ~/.maestro.",
                     "ルーターが選ぶモデル、グレード、参考にするベンチマークは、デーモン側の \
                      ~/.maestro/router.json で編集します。",
                 ))
-                .child(div().flex().flex_col().gap(px(4.)).children(models))
-                .into_any_element(),
+                .setting(
+                    Setting::new(tr("Known models", "登録されているモデル"))
+                        .child(div().flex().flex_col().gap(px(4.)).children(models)),
+                ),
         ]
     }
 
     /// Reset, Revert and Save, for the comparison page.
-    fn routing_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
+    fn routing_actions(
+        &self,
+        preferences: PreferencesWindow,
+        cx: &mut Context<Self>,
+    ) -> PreferencesWindow {
         let router = &self.main.read(cx).mirror.router;
         let changed = self.draft.as_ref().is_some_and(|draft| *draft != router.comparison)
             || self.agents_draft.is_some_and(|limit| limit != router.max_agents);
-        div()
-            .flex()
-            .items_center()
-            .gap(theme.spacing.sm)
-            .pt(theme.spacing.lg)
-            .child(
+        preferences
+            .action(
                 Button::new("defaults", tr("Reset to defaults", "初期設定に戻す"))
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -860,15 +847,14 @@ impl Settings {
                         cx.notify();
                     })),
             )
-            .child(div().flex_1())
-            .child(Button::new("revert", tr("Revert", "元に戻す")).disabled(!changed).on_click(
+            .action(Button::new("revert", tr("Revert", "元に戻す")).disabled(!changed).on_click(
                 cx.listener(|this, _, _, cx| {
                     this.draft = None;
                     this.agents_draft = None;
                     cx.notify();
                 }),
             ))
-            .child(Button::new("save", tr("Save", "保存")).primary().disabled(!changed).on_click(
+            .action(Button::new("save", tr("Save", "保存")).primary().disabled(!changed).on_click(
                 cx.listener(|this, _, _, cx| {
                     if this.draft.is_none() && this.agents_draft.is_none() {
                         return;
@@ -908,45 +894,25 @@ fn choices(common: &[usize], current: usize) -> (Vec<usize>, usize) {
 impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let groups = match self.page {
-            Page::General => self.general(cx),
-            Page::Providers => self.providers(cx),
-            Page::Routing => self.routing(cx),
-        };
-        let header = SectionHeader::new(self.page.title())
-            .description(self.page.description())
-            .when(self.page == Page::Providers, |header| {
-                header.action(
-                    Button::new("rescan", tr("Check again", "再確認"))
-                        .icon(IconName::Refresh)
-                        .size(ControlSize::Small)
-                        .disabled(self.scanning)
-                        .on_click(cx.listener(|this, _, _, cx| this.scan(cx))),
-                )
-            });
-        let actions = (self.page == Page::Routing).then(|| self.routing_actions(cx));
-        // Each page has its own scroll position, so a page always opens at its top.
-        let page = div()
-            .id(("page", self.page as usize))
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .overflow_y_scroll()
-            .bg(theme.colors.surface)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme.spacing.xl)
-                    .w_full()
-                    .max_w(theme.density.form_width)
-                    .px(theme.spacing.xxl)
-                    .py(theme.spacing.xl)
-                    .child(header)
-                    .children(groups)
-                    .children(actions),
-            );
+        let mut pages = Page::ALL.map(|page| {
+            SettingsPage::new(page.title()).icon(page.icon()).description(page.description())
+        });
+        for group in self.general(cx) {
+            pages[0] = std::mem::replace(&mut pages[0], SettingsPage::new("")).group(group);
+        }
+        for group in self.providers(cx) {
+            pages[1] = std::mem::replace(&mut pages[1], SettingsPage::new("")).group(group);
+        }
+        for group in self.routing(cx) {
+            pages[2] = std::mem::replace(&mut pages[2], SettingsPage::new("")).group(group);
+        }
+        let query = input::text(&self.search, cx);
+        let search = TextField::new()
+            .icon(IconName::Search)
+            .placeholder(cx.strings().search_settings.clone())
+            .empty(query.is_empty())
+            .size(ControlSize::Small)
+            .child(input::editor(&self.search));
 
         let changed = self.draft.is_some() || self.agents_draft.is_some();
         let status = match &self.status {
@@ -959,21 +925,45 @@ impl Render for Settings {
                 .tone(Tone::Warning),
             None => StatusBar::new(),
         };
+        let mut preferences = PreferencesWindow::new("settings")
+            .selected(self.page as usize)
+            .on_select(cx.listener(|this, index: &usize, window, cx| {
+                this.page = Page::ALL[*index];
+                this.status = None;
+                // A picked page or search result shows the page itself.
+                input::clear(&this.search, window, cx);
+                cx.notify();
+            }))
+            .search(query, search)
+            .sidebar_width(px(260.))
+            .status(
+                status.trailing(
+                    Label::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .size(TextSize::XSmall)
+                        .color(TextColor::Faint),
+                ),
+            );
+        for page in pages {
+            preferences = preferences.page(page);
+        }
+        preferences = match self.page {
+            Page::General => preferences,
+            Page::Providers => preferences.action(
+                Button::new("rescan", tr("Check again", "再確認"))
+                    .icon(IconName::Refresh)
+                    .disabled(self.scanning)
+                    .on_click(cx.listener(|this, _, _, cx| this.scan(cx))),
+            ),
+            Page::Routing => self.routing_actions(preferences, cx),
+        };
         WindowFrame::new()
             .font(theme.typography.ui.clone())
             .text_color(theme.colors.text)
             .size_full()
             .flex()
             .flex_col()
-            .child(TitleBar::new().title(tr("Settings", "設定")))
-            .child(div().flex().flex_1().min_h_0().child(self.sidebar(cx)).child(page))
-            .child(
-                status.trailing(
-                    Label::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .size(TextSize::XSmall)
-                        .color(TextColor::Faint),
-                ),
-            )
+            .child(TitleBar::new().app_icon(crate::app_icon()).title(tr("Settings", "設定")))
+            .child(preferences)
     }
 }
 

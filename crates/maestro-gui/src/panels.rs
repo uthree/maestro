@@ -4,8 +4,8 @@
 use atelier::agent::Composer;
 use atelier::{
     ActiveTheme, Badge, Button, ButtonVariant, Card, ControlSize, Edge, EmptyState, IconName,
-    Label, ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, Sidebar, Spinner,
-    Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
+    Label, ListItem, MenuItem, Popover, SectionHeader, Segment, SegmentedControl, SelectionScope,
+    Sidebar, Spinner, Switch, Tabs, TextColor, TextField, TextSize, Tone, menu_separator,
 };
 use gpui::{
     ClickEvent, Context, Corner, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
@@ -825,6 +825,7 @@ impl Maestro {
         let role = if lead { tr("lead", "リード") } else { tr("worker", "ワーカー") };
         let busy = view.transcript.busy;
         let provider = view.spec.model.provider;
+        let waiting = self.waiting_messages(agent, view, &self.fields.node_message, cx);
         div()
             .flex()
             .flex_col()
@@ -838,14 +839,26 @@ impl Maestro {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap(theme.spacing.lg)
                     .p(theme.spacing.lg)
-                    .children(rows),
+                    // One selection over the whole conversation, as in the commander's.
+                    .child(
+                        SelectionScope::new("worker-selection")
+                            .flex()
+                            .flex_col()
+                            .gap(theme.spacing.lg)
+                            .children(rows),
+                    ),
             )
             .when(reply, |worker| {
                 worker.child(
-                    div().flex_none().px(theme.spacing.sm).pb(theme.spacing.sm).child(
-                        input::stretch(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .px(theme.spacing.sm)
+                        .pb(theme.spacing.sm)
+                        .children(waiting)
+                        .child(input::stretch(
                             width - theme.spacing.sm * 2.,
                             Composer::new("worker-composer")
                                 .input({
@@ -868,8 +881,7 @@ impl Maestro {
                                 .on_stop(
                                     cx.listener(move |this, _, _, cx| this.interrupt(agent, cx)),
                                 ),
-                        ),
-                    ),
+                        )),
                 )
             })
     }

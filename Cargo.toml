@@ -25,6 +25,8 @@ maestro-markdown = { path = "crates/maestro-markdown", version = "0.1.0" }
 maestro-gui = { path = "crates/maestro-gui", version = "0.1.0" }
 maestro-mock = { path = "crates/maestro-mock", version = "0.1.0" }
 
+# Atelier's coding-agent adapters, at the revision maestro-gui pins Atelier itself to.
+atelier-agents = { git = "https://github.com/uthree/design-language", rev = "d51b9592556ac9cf30930eb1982b2ead58686b89" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"

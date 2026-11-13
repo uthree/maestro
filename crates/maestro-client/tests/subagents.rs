@@ -45,6 +45,8 @@ fn fake_claude() -> String {
     ]}});
     format!(
         r##"#!/bin/sh
+read init
+echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"atelier-initialize","response":{{}}}}}}'
 read prompt
 case "$*" in
   *--disallowedTools\ Write*)
