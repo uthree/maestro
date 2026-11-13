@@ -17,7 +17,7 @@ use maestro_core::{AgentEvent, AgentId, AgentRole, AgentSpec, Workspace};
 use maestro_host::github::{self, PullRequestDraft};
 use maestro_host::{HostError, git};
 use maestro_protocol::{
-    AgentStatus, AgentSummary, Command, CommandError, Event, MergeMethod, Reply,
+    AgentStatus, AgentSummary, Command, CommandError, Event, MergeMethod, QueueEdit, Reply,
 };
 
 pub(crate) type Broadcast = Arc<dyn Fn(Event) + Send + Sync>;
@@ -34,6 +34,8 @@ struct Agent {
     transcript: Vec<AgentEvent>,
     /// Messages sent during the current turn, for the turns after it.
     queued: VecDeque<String>,
+    /// Whether the queue waits for the person to resume it instead of sending when a turn ends.
+    paused: bool,
     /// The briefing a commander last read, so that it reads one only when the work changed.
     briefed: Option<String>,
 }
@@ -71,6 +73,7 @@ impl Runtime {
                 session: None,
                 transcript,
                 queued: VecDeque::new(),
+                paused: false,
                 briefed: None,
             };
             agents.insert(id, agent);
@@ -128,6 +131,7 @@ impl Runtime {
                 | Command::GetTranscript { .. }
                 | Command::SendToAgent { .. }
                 | Command::AnswerPermission { .. }
+                | Command::EditQueue { .. }
                 | Command::InterruptAgent { .. }
                 | Command::StopAgent { .. }
                 | Command::PublishWorkspace { .. }
@@ -177,6 +181,7 @@ impl Runtime {
                     session.answer(request, allow)
                 })
             }
+            Command::EditQueue { agent, edit } => self.edit_queue(agent, edit),
             Command::InterruptAgent { agent } => {
                 self.with_session(agent, None, AgentSession::interrupt)
             }
@@ -229,6 +234,7 @@ impl Runtime {
                 session: None,
                 transcript: Vec::new(),
                 queued: VecDeque::new(),
+                paused: false,
                 briefed: None,
             },
         );
@@ -321,8 +327,11 @@ impl Runtime {
                 entry.status = status;
             }
             match status {
-                Some(AgentStatus::Idle) => next = entry.queued.pop_front(),
-                Some(AgentStatus::Exited) => entry.queued.clear(),
+                Some(AgentStatus::Idle) if !entry.paused => next = entry.queued.pop_front(),
+                Some(AgentStatus::Exited) => {
+                    entry.queued.clear();
+                    entry.paused = false;
+                }
                 _ => {}
             }
             remember(&mut entry.transcript, &event);
@@ -345,6 +354,45 @@ impl Runtime {
     }
 
     /// Acts on a running agent's session, first recording the status the action leads to.
+    /// Changes what waits for an agent's turn to end, reports it, and sends the first message
+    /// at once when nothing else would: the agent is between turns and the queue may send.
+    fn edit_queue(&self, agent: AgentId, edit: QueueEdit) -> Result<Reply, CommandError> {
+        let mut agents = self.agents.lock().expect("agents lock");
+        let entry = agents.get_mut(&agent).ok_or(CommandError::UnknownAgent { agent })?;
+        let in_turn =
+            matches!(entry.status, AgentStatus::Working | AgentStatus::AwaitingPermission);
+        let mut interrupt = false;
+        match edit {
+            QueueEdit::Remove { index } => {
+                entry.queued.remove(index).ok_or(CommandError::NotQueued { index })?;
+            }
+            QueueEdit::SendNow { index } => {
+                let text = entry.queued.remove(index).ok_or(CommandError::NotQueued { index })?;
+                entry.queued.push_front(text);
+                entry.paused = false;
+                interrupt = in_turn;
+            }
+            QueueEdit::Pause { paused } => entry.paused = paused,
+        }
+        let changed = AgentEvent::QueueChanged {
+            queued: entry.queued.iter().cloned().collect(),
+            paused: entry.paused,
+        };
+        let next = (!in_turn && !entry.paused && entry.session.is_some())
+            .then(|| entry.queued.pop_front())
+            .flatten();
+        if interrupt && let Some(session) = &entry.session {
+            // The turn ends, and the message now first goes next.
+            session.interrupt();
+        }
+        drop(agents);
+        self.observe(agent, changed);
+        match next {
+            Some(text) => self.deliver(agent, text),
+            None => Ok(Reply::Done),
+        }
+    }
+
     fn with_session(
         &self,
         agent: AgentId,

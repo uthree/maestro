@@ -1,30 +1,22 @@
-//! The four coding-agent CLIs, behind one interface.
+//! Claude Code, Codex, Antigravity CLI and OpenCode as worker processes, through Atelier's
+//! `atelier-agents`.
 //!
-//! Each provider module holds an [`Adapter`]: a state machine with no I/O that knows which
-//! command starts the CLI, what to write to it, and how to read what it writes back into
-//! [`AgentEvent`]s. Keeping I/O out means an adapter is tested by feeding it recorded JSON, and the
-//! same adapter works whether the CLI's stdio is a local pipe or an `ssh` session.
-//! [`session::AgentSession`] supplies the I/O: it starts the process on a [`Host`], pumps lines
-//! through the adapter and hands events to a callback.
-//!
-//! The wire formats follow what Auris Studio's backends speak to the same CLIs:
-//! Claude Code's `stream-json`, Codex's `app-server` JSON-RPC, OpenCode's Agent Client Protocol
-//! and Antigravity's `stream-json`.
-
-mod antigravity;
-mod claude;
-mod codex;
-mod opencode;
-mod rpc;
-pub mod session;
+//! The adapters that read each CLI's JSON live in `atelier-agents`, shared with Auris Studio;
+//! this crate is Maestro's side of that boundary. It turns a [`WorkerConfig`] into the adapter's
+//! configuration, runs the CLI on the worker's [`Host`] through [`HostCommand`] (so an agent
+//! over `ssh`, in WSL or in a container starts the way every other Maestro process does), and
+//! hands the daemon Maestro's own [`AgentEvent`]s. Nothing past this crate learns that the
+//! adapters are not Maestro's.
 
 use std::path::PathBuf;
 
-use maestro_core::{AgentEvent, Effort, ProviderKind};
-use maestro_host::HostCommand;
-use serde_json::Value;
+use atelier_agents as agents;
+use maestro_core::{
+    AgentEvent, Effort, Host, PermissionKind, PermissionRequest, ProviderKind, ToolCall,
+};
+use maestro_host::{HostCommand, HostError};
 
-pub use session::AgentSession;
+pub use atelier_agents::Adapter;
 
 /// How to start one worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,120 +29,155 @@ pub struct WorkerConfig {
     pub effort: Option<Effort>,
     /// The directory it works in, on its host.
     pub cwd: PathBuf,
-    /// Standing instructions from the commander: the node's role and its limits.
+    /// Standing instructions put in front of the conversation: the step, its limits.
     pub instructions: String,
     /// Overrides the executable's name or path.
     pub program: Option<String>,
-    /// Refuse every change to files, where the CLI can be told so up front. The commander runs
-    /// this way; the daemon also refuses any permission it asks for.
+    /// Refuse every change to files, where the CLI can be told so up front. Commanders and leads
+    /// plan; the daemon also refuses any permission they ask for.
     pub read_only: bool,
-    /// Whether it may start sub-agents of its own. Where the CLI can be told so up front, its
-    /// sub-agent tools are refused; otherwise [`starts_subagent`] lets the daemon notice their use.
+    /// Whether it may start sub-agents of its own.
     pub subagents: bool,
 }
 
-/// What an adapter produced from one message.
-#[derive(Debug, Default, PartialEq)]
-pub struct Output {
-    /// Events for the daemon.
-    pub events: Vec<AgentEvent>,
-    /// Messages to write back to the CLI.
-    pub replies: Vec<Value>,
-}
-
-impl Output {
-    fn event(event: AgentEvent) -> Self {
-        Self { events: vec![event], replies: Vec::new() }
-    }
-
-    fn reply(reply: Value) -> Self {
-        Self { events: Vec::new(), replies: vec![reply] }
-    }
-}
-
-/// One provider's protocol, without I/O.
-///
-/// The session calls [`Adapter::start`] once after spawning [`Adapter::command`], then
-/// [`Adapter::receive`] for every line the CLI writes. [`Adapter::send`] is called only between
-/// turns, after a [`AgentEvent::TurnCompleted`] or [`AgentEvent::TurnFailed`].
-pub trait Adapter: Send {
-    /// The process to start.
-    fn command(&self) -> HostCommand;
-    /// The first messages, carrying the first prompt. An adapter whose CLI needs a handshake
-    /// sends the handshake here and the prompt once the CLI is ready.
-    fn start(&mut self, prompt: &str) -> Vec<Value>;
-    /// The next user message.
-    fn send(&mut self, text: &str) -> Vec<Value>;
-    /// One message from the CLI.
-    fn receive(&mut self, message: Value) -> Output;
-    /// Answers a [`AgentEvent::PermissionRequested`].
-    fn answer(&mut self, request: &str, allow: bool) -> Vec<Value>;
-    /// Messages that ask the CLI to stop the current turn before it is killed.
-    fn interrupt(&mut self) -> Vec<Value> {
-        Vec::new()
-    }
-}
-
-/// The adapter for a worker's provider.
+/// The adapter for `config`'s CLI.
 pub fn adapter(config: WorkerConfig) -> Box<dyn Adapter> {
-    match config.provider {
-        ProviderKind::ClaudeCode => Box::new(claude::Claude::new(config)),
-        ProviderKind::Codex => Box::new(codex::Codex::new(config)),
-        ProviderKind::Antigravity => Box::new(antigravity::Antigravity::new(config)),
-        ProviderKind::OpenCode => Box::new(opencode::OpenCode::new(config)),
-    }
-}
-
-/// Whether `tool`, a [`maestro_core::ToolCall::name`] the provider's adapter reported, hands work
-/// to a sub-agent. A worker that may not start sub-agents is stopped when it calls one: some
-/// CLIs can be told up front (see [`WorkerConfig::subagents`]) and some cannot.
-pub fn starts_subagent(provider: ProviderKind, tool: &str) -> bool {
-    let tools: &[&str] = match provider {
-        ProviderKind::ClaudeCode => &claude::SUBAGENT_TOOLS,
-        ProviderKind::Codex => &codex::SUBAGENT_TOOLS,
-        ProviderKind::Antigravity => &antigravity::SUBAGENT_TOOLS,
-        ProviderKind::OpenCode => &opencode::SUBAGENT_TOOLS,
+    let mut atelier = agents::AgentConfig::new(provider(config.provider), config.cwd);
+    atelier.model = config.model;
+    atelier.effort = config.effort.map(effort);
+    atelier.instructions = config.instructions;
+    atelier.program = config.program;
+    atelier.read_only = config.read_only;
+    atelier.subagents = config.subagents;
+    atelier.client = agents::ClientInfo {
+        name: "maestro".into(),
+        title: "Maestro".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
     };
-    tools.iter().any(|name| name.eq_ignore_ascii_case(tool))
+    agents::adapter(atelier)
 }
 
-/// What separates two messages of one turn, in the answer and in the streamed text.
-const PARAGRAPH: &str = "\n\n";
+/// Whether `tool` is how `provider` starts a sub-agent, for the CLIs that cannot be told up
+/// front not to: the daemon fails a step whose worker does so when it may not.
+pub fn starts_subagent(provider: ProviderKind, tool: &str) -> bool {
+    agents::starts_subagent(self::provider(provider), tool)
+}
 
-/// Puts the commander's instructions in front of the first prompt, for CLIs that have no
-/// separate channel for them that leaves their own system prompt intact.
-fn with_instructions(instructions: &str, prompt: &str) -> String {
-    if instructions.is_empty() {
-        prompt.to_owned()
-    } else {
-        format!("{instructions}\n\n---\n\n{prompt}")
+/// A running worker. Dropping it stops the worker.
+pub struct AgentSession(agents::AgentSession);
+
+impl AgentSession {
+    /// Starts the adapter's CLI on `host`, sends `prompt`, and reports every event to `on_event`
+    /// from the pump thread. The last event is always [`AgentEvent::Exited`].
+    pub fn spawn(
+        host: &Host,
+        adapter: Box<dyn Adapter>,
+        prompt: &str,
+        on_event: impl Fn(AgentEvent) + Send + 'static,
+    ) -> Result<Self, HostError> {
+        let forward = move |event| {
+            if let Some(event) = self::event(event) {
+                on_event(event);
+            }
+        };
+        let session = match host {
+            // On this machine the adapter writes the files it needs, owner-only, itself.
+            Host::Local => agents::AgentSession::spawn(adapter, prompt, forward),
+            _ => {
+                let process = host_command(adapter.command()).process(host);
+                agents::AgentSession::spawn_in(process, adapter, prompt, forward)
+            }
+        };
+        session
+            .map(Self)
+            .map_err(|error| HostError::Spawn { program: error.program, source: error.source })
+    }
+
+    /// Sends the next user message. Call it between turns.
+    pub fn send(&self, text: impl Into<String>) {
+        self.0.send(text);
+    }
+
+    /// Answers a permission request.
+    pub fn answer(&self, request: impl Into<String>, allow: bool) {
+        self.0.answer(request, allow);
+    }
+
+    /// Asks the CLI to abandon the current turn; the agent stays up for the next message.
+    pub fn interrupt(&self) {
+        self.0.interrupt();
+    }
+
+    /// Kills the process. [`AgentEvent::Exited`] follows.
+    pub fn stop(&self) {
+        self.0.stop();
     }
 }
 
-/// The text of a tool result that may be a string or a list of content parts.
-fn content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => {
-            parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
-        }
-        Value::Null => String::new(),
-        other => other.to_string(),
+/// The adapter's command as Maestro runs a process on a host.
+fn host_command(command: agents::CommandSpec) -> HostCommand {
+    HostCommand {
+        program: command.program,
+        args: command.args,
+        cwd: command.cwd,
+        env: command.env,
+        env_remove: command.env_remove,
     }
 }
 
-#[cfg(test)]
-fn config(provider: ProviderKind) -> WorkerConfig {
-    WorkerConfig {
-        provider,
-        model: Some("model-x".into()),
-        effort: Some(Effort::High),
-        cwd: "/work/n1".into(),
-        instructions: "Only touch src/.".into(),
-        program: None,
-        read_only: false,
-        subagents: true,
+fn provider(provider: ProviderKind) -> agents::ProviderKind {
+    match provider {
+        ProviderKind::ClaudeCode => agents::ProviderKind::ClaudeCode,
+        ProviderKind::Codex => agents::ProviderKind::Codex,
+        ProviderKind::Antigravity => agents::ProviderKind::Antigravity,
+        ProviderKind::OpenCode => agents::ProviderKind::OpenCode,
     }
+}
+
+fn effort(effort: Effort) -> agents::Effort {
+    match effort {
+        Effort::Low => agents::Effort::Low,
+        Effort::Medium => agents::Effort::Medium,
+        Effort::High => agents::Effort::High,
+        Effort::Max => agents::Effort::Max,
+    }
+}
+
+/// An adapter's event as Maestro's. The ones Maestro has no use for yet (the CLI's session id,
+/// its models, the plan's limits) are dropped; `Prompted` and `Queued` are Maestro's own to
+/// report, and an adapter never produces them.
+fn event(event: agents::AgentEvent) -> Option<AgentEvent> {
+    use agents::AgentEvent as From;
+    Some(match event {
+        From::Started => AgentEvent::Started,
+        From::Prompted { text } => AgentEvent::Prompted { text },
+        From::Queued { text } => AgentEvent::Queued { text },
+        From::Text { text } => AgentEvent::Text { text },
+        From::Reasoning { text } => AgentEvent::Reasoning { text },
+        From::ToolStarted { call } => AgentEvent::ToolStarted {
+            call: ToolCall { id: call.id, name: call.name, input: call.input },
+        },
+        From::ToolFinished { id, ok, output } => AgentEvent::ToolFinished { id, ok, output },
+        From::PermissionRequested { request } => AgentEvent::PermissionRequested {
+            request: PermissionRequest {
+                id: request.id,
+                kind: match request.kind {
+                    agents::PermissionKind::Command => PermissionKind::Command,
+                    agents::PermissionKind::FileChange => PermissionKind::FileChange,
+                    agents::PermissionKind::Other => PermissionKind::Other,
+                },
+                summary: request.summary,
+                detail: request.detail,
+            },
+        },
+        From::TurnCompleted { answer } => AgentEvent::TurnCompleted { answer },
+        From::TurnFailed { message } => AgentEvent::TurnFailed { message },
+        From::Exited { reason } => AgentEvent::Exited { reason },
+        From::SessionStarted { .. }
+        | From::ResumeFailed { .. }
+        | From::Models { .. }
+        | From::RateLimits { .. } => return None,
+    })
 }
 
 #[cfg(test)]
@@ -167,5 +194,30 @@ mod tests {
         assert!(starts_subagent(ProviderKind::OpenCode, "task"));
         assert!(starts_subagent(ProviderKind::Codex, "collabAgentToolCall"));
         assert!(!starts_subagent(ProviderKind::Codex, "commandExecution"));
+    }
+
+    #[test]
+    fn a_remote_worker_runs_the_adapters_command_through_the_host() {
+        let config = WorkerConfig {
+            provider: ProviderKind::ClaudeCode,
+            model: None,
+            effort: Some(Effort::High),
+            cwd: "/work/n1".into(),
+            instructions: String::new(),
+            program: None,
+            read_only: true,
+            subagents: false,
+        };
+        let command = host_command(adapter(config).command());
+        assert_eq!(command.program, "claude");
+        assert_eq!(command.cwd.as_deref(), Some(std::path::Path::new("/work/n1")));
+        let ssh = command.process(&Host::Ssh { destination: "box".into() });
+        assert_eq!(ssh.get_program(), "ssh");
+    }
+
+    #[test]
+    fn events_maestro_does_not_use_are_dropped() {
+        assert_eq!(event(agents::AgentEvent::Started), Some(AgentEvent::Started));
+        assert_eq!(event(agents::AgentEvent::SessionStarted { id: "s".into() }), None);
     }
 }

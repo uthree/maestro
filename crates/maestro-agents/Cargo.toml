@@ -1,6 +1,6 @@
 [package]
 name = "maestro-agents"
-description = "Drives Claude Code, Codex, Antigravity CLI and OpenCode as worker processes"
+description = "Drives Claude Code, Codex, Antigravity CLI and OpenCode as worker processes, through atelier-agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The adapters for every CLI, shared with Auris Studio.
+atelier-agents.workspace = true
 maestro-core.workspace = true
 maestro-host.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

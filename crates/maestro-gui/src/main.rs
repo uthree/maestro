@@ -36,9 +36,12 @@ mod settings;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use atelier::{ActiveTheme, Appearance, Assets, Direction, Theme};
+use std::borrow::Cow;
+
+use atelier::{ActiveTheme, Appearance, Assets, Direction, IconSource, Theme};
 use gpui::{
-    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
+    App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions, px,
 };
 use maestro_client::Launch;
 use prefs::Preferences;
@@ -115,7 +118,7 @@ fn main() -> ExitCode {
         _ => saved.appearance().unwrap_or(Appearance::Dark),
     };
 
-    Application::new().with_assets(Assets::default()).run(move |cx: &mut App| {
+    Application::new().with_assets(Assets::with_fallback(AppAssets)).run(move |cx: &mut App| {
         atelier::init(cx, Theme::new(direction, appearance));
         // The words Atelier's components draw themselves: tooltips, Send, Allow, states.
         if i18n::lang() == i18n::Lang::Ja {
@@ -138,6 +141,34 @@ fn main() -> ExitCode {
         cx.activate(true);
     });
     ExitCode::SUCCESS
+}
+
+/// Where [`AppAssets`] serves the app's own mark.
+const APP_ICON_PATH: &str = "maestro/title-bar.png";
+
+/// The app's mark for the leading edge of every window's title bar. `TitleBar` draws it on
+/// Windows and Linux and leaves it out on macOS, where the traffic lights hold that corner.
+pub(crate) fn app_icon() -> IconSource {
+    IconSource::image(APP_ICON_PATH)
+}
+
+/// The app's own files, behind Atelier's icons: the title-bar mark.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok((path == APP_ICON_PATH).then_some(Cow::Borrowed(
+            include_bytes!("../assets/app-icon/title-bar.png").as_slice(),
+        )))
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(APP_ICON_PATH
+            .starts_with(path)
+            .then(|| SharedString::from(APP_ICON_PATH))
+            .into_iter()
+            .collect())
+    }
 }
 
 /// A window in Atelier's frame, centred, `size` big and never smaller than `min`.

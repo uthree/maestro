@@ -18,6 +18,8 @@ use maestro_daemon::Hub;
 use maestro_protocol::{AgentStatus, Command, Event, Reply};
 
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
+read init
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"atelier-initialize","response":{}}}'
 read prompt
 echo '{"type":"system","subtype":"init"}'
 echo '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch made"}}}'

@@ -11,9 +11,10 @@ The plan, and why the boundaries are where they are, is [docs/plan.md](docs/plan
   views redraw from `Event`s, which every connected frontend receives.
 * **Assume the daemon is on another machine.** Requests are a network round trip; never make one
   on a UI thread. `Host::Local` means the daemon's machine, not the user's.
-* **Provider formats stop at the adapter.** Each CLI's JSON is read only in its module of
-  `maestro-agents`, which turns it into `AgentEvent`s. Adapters do no I/O, so test them by feeding
-  recorded messages; `AgentSession` is the only place that touches a CLI's stdio.
+* **Provider formats stop at the adapter.** Each CLI's JSON is read only by its adapter in
+  Atelier's `atelier-agents`, shared with Auris Studio; `maestro-agents` turns those events into
+  Maestro's `AgentEvent`s and starts the process on its `Host`. A fix to how a CLI is spoken to
+  goes to `atelier-agents`, not here. `AgentSession` is the only place that touches a CLI's stdio.
 * **Rich text is read once, drawn per frontend.** Markdown, TeX and code highlighting are read
   into a model by `maestro-markdown`, which knows no UI; each frontend only draws that model.
 * **Hosts are explicit.** Run processes through `maestro_host::HostCommand` with the `Host` they

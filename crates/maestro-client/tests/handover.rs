@@ -21,6 +21,8 @@ use maestro_protocol::{Command, Event, Reply};
 fn fake_claude(plan: &str) -> String {
     format!(
         r#"#!/bin/sh
+read init
+echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"atelier-initialize","response":{{}}}}}}'
 case "$*" in
   *--disallowedTools\ Write*)
     read prompt

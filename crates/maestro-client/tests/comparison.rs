@@ -19,6 +19,8 @@ use maestro_protocol::{Command, Event, Reply};
 
 /// Leaves a file named after its worktree and a list of what it found there.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
+read init
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"atelier-initialize","response":{}}}'
 read prompt
 here=$(basename "$PWD")
 ls > "$here.seen"
