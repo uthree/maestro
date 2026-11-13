@@ -12,6 +12,9 @@
 //!   `ssh host maestro-daemon --stdio`. It relays stdio to the resident daemon, starting one first
 //!   if none answers, and replacing one that speaks an older protocol than its own (left running
 //!   from before an upgrade). SSH does the authentication, so the daemon opens no port of its own.
+//!   Where there are no Unix sockets (Windows), `--stdio` is the daemon itself: it keeps the same
+//!   files in the same home (`%USERPROFILE%\.maestro` without `HOME`), but lives only as long as
+//!   its frontend, and two frontends at once each have a daemon of their own.
 //!
 //! Diagnostics go to standard error, which `ssh` passes back separately from the protocol.
 
@@ -62,6 +65,16 @@ pub fn run(args: &[String]) -> ExitCode {
 /// How long the resident daemon waits with nothing to do before it exits.
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 
+/// Where the daemon keeps what it remembers: `$MAESTRO_HOME`, or `.maestro` in the user's home.
+fn home() -> std::io::Result<PathBuf> {
+    if let Some(home) = std::env::var_os("MAESTRO_HOME") {
+        return Ok(home.into());
+    }
+    let home = maestro_host::home_dir()
+        .ok_or_else(|| std::io::Error::other("neither HOME nor USERPROFILE is set"))?;
+    Ok(home.join(".maestro"))
+}
+
 fn usage() -> ExitCode {
     eprintln!("usage: maestro-daemon (serve [--idle SECONDS] | --stdio) [--socket PATH]");
     ExitCode::from(2)
@@ -80,7 +93,7 @@ mod platform {
 
     use maestro_protocol::{PROTOCOL_VERSION, ServerMessage};
 
-    use super::Hub;
+    use super::{Hub, home};
 
     /// `$XDG_RUNTIME_DIR/maestro/daemon.sock`, or `~/.maestro/daemon.sock` without one.
     fn default_socket() -> io::Result<PathBuf> {
@@ -90,15 +103,6 @@ mod platform {
         let home = std::env::var_os("HOME")
             .ok_or_else(|| io::Error::other("neither XDG_RUNTIME_DIR nor HOME is set"))?;
         Ok(PathBuf::from(home).join(".maestro/daemon.sock"))
-    }
-
-    /// Where the daemon keeps what it remembers: `$MAESTRO_HOME`, or `~/.maestro`.
-    fn home() -> io::Result<PathBuf> {
-        if let Some(home) = std::env::var_os("MAESTRO_HOME") {
-            return Ok(home.into());
-        }
-        let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?;
-        Ok(PathBuf::from(home).join(".maestro"))
     }
 
     pub(super) fn serve(socket: Option<PathBuf>, idle: Option<Duration>) -> io::Result<()> {
@@ -277,14 +281,19 @@ mod platform {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::Hub;
+    use super::{Hub, home};
 
     pub(super) fn serve(_: Option<PathBuf>, _: Option<Duration>) -> io::Result<()> {
         Err(io::Error::other("the resident daemon needs a Unix host; use --stdio"))
     }
 
-    /// Without Unix sockets the daemon lives only as long as this connection.
+    /// Without Unix sockets the daemon lives only as long as this connection, but it still
+    /// takes back what was saved before and saves what changes, as the resident daemon does.
     pub(super) fn relay(_: Option<PathBuf>) -> io::Result<()> {
-        Hub::new().serve(io::stdin(), io::stdout()).map_err(io::Error::other)
+        let home = home()?;
+        let hub = Hub::open(&home)?;
+        let served = hub.serve(io::stdin(), io::stdout()).map_err(io::Error::other);
+        hub.shut_down(&home)?;
+        served
     }
 }
